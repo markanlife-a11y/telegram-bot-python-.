@@ -904,6 +904,40 @@ def format_calculator_result_card(mode: str, culture: str, pesticide_name: str, 
     return "\n".join(header_lines) + "\n\n" + body
 
 
+def build_combined_product_card(product_name: str, rows: List[Dict[str, Any]]) -> str:
+    """Build a single card for a product, merging cultures across all rows with that name."""
+    nkey = normalize_text(product_name)
+    same = [r for r in rows if get_val(r,'name') and normalize_text(get_val(r,'name')) == nkey]
+    if not same:
+        return f"🛡️ <b>{product_name}</b>\n❌ Данных не найдено"
+    # Take type/ai/rate from the first non-empty
+    typ = next((get_val(r,'type') for r in same if get_val(r,'type')), '')
+    ai = next((get_val(r,'ai') for r in same if get_val(r,'ai')), '')
+    rate = next((get_val(r,'rate') for r in same if get_val(r,'rate')), '')
+    # Merge cultures
+    cultures = []
+    seen = set()
+    for r in same:
+        crops = get_val(r, 'crops')
+        for c in split_crops_field(crops):
+            cc = normalize_crop_name(c)
+            ck = crop_key_for_dedup(cc)
+            if ck not in seen:
+                seen.add(ck)
+                cultures.append(cc)
+    cultures_text = ', '.join(cultures)
+    parts = [f"🛡️ <b>{product_name}</b>"]
+    if typ:
+        parts.append(f"🏷️ Вид: <b>{typ}</b>")
+    if ai:
+        parts.append(f"🧪 Д.в.: <b>{ai}</b>")
+    if cultures_text:
+        parts.append(f"🌱 Культура: <b>{cultures_text}</b>")
+    if rate:
+        parts.append(f"💧 Норма: <b>{rate}</b>")
+    return "\n".join(parts)
+
+
 def create_smart_keyboard(items: List[str], callback_func) -> List[List[InlineKeyboardButton]]:
     """
     Smart button grouping: long labels occupy full row, short labels go two per row.
@@ -1086,6 +1120,74 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if text == '/dbg_off':
         await cmd_dbg_off(update, context)
+        return
+
+    # Preempt menu buttons regardless of current state
+    if btn == 'подбор пестицида':
+        clear_user_state(context)
+        await ensure_data_loaded()
+        data = _DATA_CACHE['data']
+        build_crops_index(data['rows'])
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text='📋 <b>Выберите культуру/цели обработки</b>', parse_mode='HTML', reply_markup=crops_page_keyboard(0))
+        return
+    if btn == 'поиск препарата по названию':
+        clear_user_state(context)
+        set_user_state(context, STATE_AWAITING_NAME)
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text='🔎 Введите название препарата текстом. Я учту опечатки и раскладку.', reply_markup=reply_kb())
+        return
+    if btn == 'поиск по дв':
+        clear_user_state(context)
+        set_user_state(context, STATE_AWAITING_DV)
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text='🧪 Введите часть названия действующего вещества (например: "флорасулам" или "д.в. 2,4-д")', reply_markup=reply_kb())
+        return
+    if btn == 'калькулятор расхода препарата':
+        clear_user_state(context)
+        if chat_id:
+            calc_menu = '🧮 Выберите режим расчёта'
+            rows_calc = [
+                [InlineKeyboardButton('Рассчитать по площади', callback_data='calc|mode|area')],
+                [InlineKeyboardButton('Рассчитать по объёму бака', callback_data='calc|mode|tank')],
+                [InlineKeyboardButton('Рассчитать норму протравителя', callback_data='calc|mode|seed')]
+            ]
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=calc_menu,
+                reply_markup=InlineKeyboardMarkup(rows_calc)
+            )
+        return
+    if btn == 'помощь':
+        clear_user_state(context)
+        await cmd_help(update, context)
+        return
+    if btn == 'контакты':
+        contacts = await ensure_contacts_loaded()
+        if chat_id:
+            if not contacts:
+                await context.bot.send_message(chat_id=chat_id, text='❌ Контакты не найдены', reply_markup=reply_kb())
+                return
+            buttons: List[InlineKeyboardButton] = []
+            for idx, c in enumerate(contacts):
+                label = c.get('Филиал/Офис') or 'Офис'
+                buttons.append(InlineKeyboardButton(text=label, callback_data=f'contact|{idx}'))
+            rows_kb: List[List[InlineKeyboardButton]]] = []
+            cur: List[InlineKeyboardButton] = []
+            for b in buttons:
+                if len(b.text) > 18:
+                    if cur:
+                        rows_kb.append(cur)
+                        cur = []
+                    rows_kb.append([b])
+                else:
+                    cur.append(b)
+                    if len(cur) == 2:
+                        rows_kb.append(cur)
+                        cur = []
+            if cur:
+                rows_kb.append(cur)
+            await context.bot.send_message(chat_id=chat_id, text='📞 <b>Выберите филиал/офис:</b>', parse_mode='HTML', reply_markup=InlineKeyboardMarkup(rows_kb))
         return
 
     # Handle state-based input processing
@@ -1626,6 +1728,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=crops_page_keyboard_for_mode(mode, page)
         )
         return
+    if data.startswith('namepick|'):
+        hh = data.split('h:',1)[1] if 'h:' in data else ''
+        await ensure_data_loaded()
+        rows = _DATA_CACHE['data']['rows']
+        # find first name whose normalized hash matches
+        def find_name() -> str:
+            for r in rows:
+                nm = get_val(r,'name')
+                if nm and hash32(normalize_text(nm)) == hh:
+                    return nm
+            return ''
+        nm = find_name()
+        if not nm:
+            await q.message.edit_text('❌ Не удалось определить препарат', reply_markup=None)
+            return
+        card = build_combined_product_card(nm, rows)
+        await q.message.edit_text(text=card, parse_mode='HTML', reply_markup=None)
+        return
     if data.startswith('calccrop|'):
         # Format: calccrop|m:<mode>|h:<hash>
         try:
@@ -1789,9 +1909,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.edit_text(text='Не найдено', reply_markup=None)
             return
         chunks = []
+        header = '› <i>'+type_label+'</i>\n'
+        chunks = []
         for r in filtered[:10]:
             name = get_val(r,'name')
-            typ = get_val(r,'type')
             ai = get_val(r,'ai')
             pests = get_val(r,'pests')
             rate = get_val(r,'rate')
@@ -1799,8 +1920,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             line = []
             if name:
                 line.append('🛡️ <b>'+name+'</b>')
-            if typ:
-                line.append('🏷️ Вид: <b>'+typ+'</b>')
             if ai:
                 line.append('🧪 Д.в.: <b>'+ai+'</b>')
             if crops:
@@ -1810,7 +1929,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if rate:
                 line.append('💧 Норма: <b>'+rate+'</b>')
             chunks.append('\n'.join(line))
-        text_out = ('\n\n').join(chunks)
+        text_out = header + ('\n\n').join(chunks)
         await q.message.edit_text(text=text_out, parse_mode='HTML', reply_markup=None)
         return
     if data.startswith('contact|'):
