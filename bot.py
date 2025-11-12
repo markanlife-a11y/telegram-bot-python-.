@@ -1277,13 +1277,22 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_user_state(context)
         set_user_state(context, STATE_CALC_MODE)
         if chat_id:
-            calc_menu = ('🧮 <b>Калькулятор расхода препарата</b>\n\n'
-                        'Выберите тип расчета:\n'
-                        '1️⃣ Расчет по площади (л/га, кг/га)\n'
-                        '2️⃣ Расчет для опрыскивателя (на бак)\n'
-                        '3️⃣ Расчет для протравителя (л/т, кг/т)\n\n'
-                        'Введите номер или название:')
-            await context.bot.send_message(chat_id=chat_id, text=calc_menu, parse_mode='HTML', reply_markup=reply_kb())
+            # Создаем инлайн-кнопки
+            keyboard = [
+                [InlineKeyboardButton("1️⃣ Расчет по площади (л/га, кг/га)", callback_data='calc_area')],
+                [InlineKeyboardButton("2️⃣ Расчет для опрыскивателя (на бак)", callback_data='calc_sprayer')],
+                [InlineKeyboardButton("3️⃣ Расчет для протравителя (л/т, кг/т)", callback_data='calc_treater')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            calc_menu = '🧮 <b>Калькулятор расхода препарата</b>\n\nВыберите тип расчета:'
+
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text=calc_menu, 
+                parse_mode='HTML', 
+                reply_markup=reply_markup
+            )
         return
     if btn == 'помощь':
         clear_user_state(context)
@@ -1425,7 +1434,33 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg += '\n' + k + ': ' + vv
         await q.message.edit_text(text=msg, parse_mode='HTML')
         return
-    await q.message.reply_text(f'CB: {data}')
+    # Обработка кнопок калькулятора
+    if data == 'calc_area':
+        clear_user_state(context)
+        set_user_state(context, STATE_CALC_CROP, calc_mode='area')
+        await q.message.edit_text(
+            text="📏 <b>Расчет по площади</b>\n\nВведите название культуры:",
+            parse_mode='HTML'
+        )
+        return
+    elif data == 'calc_sprayer':
+        clear_user_state(context)
+        set_user_state(context, STATE_CALC_CROP, calc_mode='tank')
+        await q.message.edit_text(
+            text="🚜 <b>Расчет для опрыскивателя</b>\n\nВведите название культуры:",
+            parse_mode='HTML'
+        )
+        return
+    elif data == 'calc_treater':
+        clear_user_state(context)
+        set_user_state(context, STATE_CALC_CROP, calc_mode='seed')
+        await q.message.edit_text(
+            text="🌾 <b>Расчет для протравителя</b>\n\nВведите название культуры:",
+            parse_mode='HTML'
+        )
+        return
+
+        await q.message.reply_text(f'CB: {data}')
 
 
 def main():
