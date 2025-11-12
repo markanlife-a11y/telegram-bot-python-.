@@ -524,14 +524,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cmd_dbg_off(update, context)
         return
 
-    # Handle input modes before button logic
-    mode = context.user_data.get('mode')
-    if mode in ('name','dv','calc') and not text.startswith('/'):
-        # clear mode after handling
+    # Handle state-based input processing
+    current_state = get_user_state(context)
+    if current_state and not text.startswith('/'):
         try:
-            await ensure_data_loaded()
-            rows = _DATA_CACHE['data']['rows']
-            if mode == 'name':
+            if current_state == STATE_AWAITING_NAME:
+                await ensure_data_loaded()
+                rows = _DATA_CACHE['data']['rows']
                 q = text
                 def score_row(r):
                     name = get_val(r, 'name')
@@ -563,9 +562,12 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             line.append('💧 Норма: '+rate)
                         chunks.append('\n'.join(line))
                     await msg.reply_html(('\n\n').join(chunks), reply_markup=reply_kb())
-                context.user_data.pop('mode', None)
+                clear_user_state(context)
                 return
-            if mode == 'dv':
+                
+            elif current_state == STATE_AWAITING_DV:
+                await ensure_data_loaded()
+                rows = _DATA_CACHE['data']['rows']
                 q = normalize_text(text)
                 res = []
                 for r in rows:
@@ -590,32 +592,157 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             line.append('💧 Норма: '+rate)
                         chunks.append('\n'.join(line))
                     await msg.reply_html(('\n\n').join(chunks), reply_markup=reply_kb())
-                context.user_data.pop('mode', None)
+                clear_user_state(context)
                 return
-            if mode == 'calc':
-                import re
-                s = text.strip().lower()
-                m = re.search(r'(\d+[\d\.,]*)\s*(мл|ml|л|l)\s*/\s*га', s)
-                if m:
-                    num = m.group(1).replace(',', '.').replace(' ', '')
-                    unit = m.group(2)
-                    try:
-                        val = float(num)
-                        if unit in ('мл','ml'):
-                            lph = val/1000.0
-                        else:
-                            lph = val
-                        await msg.reply_text(f'Норма: {lph:.3f} л/га', reply_markup=reply_kb())
-                    except Exception:
-                        await msg.reply_text('Не удалось распознать число. Пример: 0.5 л/га или 500 мл/га', reply_markup=reply_kb())
+                
+            elif current_state == STATE_CALC_MODE:
+                # Calculator mode selection
+                mode_text = text.strip().lower()
+                if mode_text in ['1', 'площадь', 'поле']:
+                    set_user_state(context, STATE_CALC_CROP, calc_mode='area')
+                    await msg.reply_text('🌱 Введите название препарата для расчета по площади:', reply_markup=reply_kb())
+                elif mode_text in ['2', 'опрыскиватель', 'бак']:
+                    set_user_state(context, STATE_CALC_CROP, calc_mode='tank')
+                    await msg.reply_text('🌱 Введите название препарата для расчета на опрыскиватель:', reply_markup=reply_kb())
+                elif mode_text in ['3', 'протравитель', 'семена']:
+                    set_user_state(context, STATE_CALC_CROP, calc_mode='seed')
+                    await msg.reply_text('🌱 Введите название препарата для протравливания:', reply_markup=reply_kb())
                 else:
-                    await msg.reply_text('Введите норму в формате: 0.5 л/га или 500 мл/га', reply_markup=reply_kb())
-                # keep calc mode for next input
+                    await msg.reply_text('Выберите режим калькулятора:\n1 - Расчет по площади\n2 - Расчет для опрыскивателя\n3 - Расчет для протравителя', reply_markup=reply_kb())
                 return
-        finally:
-            pass
+                
+            elif current_state == STATE_CALC_CROP:
+                # Find product by name or parse manual rate
+                await ensure_data_loaded()
+                rows = _DATA_CACHE['data']['rows']
+                
+                # Try to parse as manual rate first
+                components = parse_rate_components(text)
+                if components:
+                    # Manual rate entered
+                    calc_mode = context.user_data.get('calc_mode')
+                    product_name = 'Препарат (ручной ввод)'
+                    
+                    if calc_mode == 'area':
+                        set_user_state(context, STATE_CALC_HECTARES, components=components, product_name=product_name)
+                        await msg.reply_text(f'📊 {product_name}\n💧 Норма: {text}\n\n🌾 Введите площадь в гектарах:', reply_markup=reply_kb())
+                    elif calc_mode == 'tank':
+                        set_user_state(context, STATE_CALC_WATER_RATE, components=components, product_name=product_name)
+                        await msg.reply_text(f'📊 {product_name}\n💧 Норма: {text}\n\n💦 Введите норму воды (л/га):', reply_markup=reply_kb())
+                    elif calc_mode == 'seed':
+                        set_user_state(context, STATE_CALC_TONS, components=components, product_name=product_name)
+                        await msg.reply_text(f'📊 {product_name}\n💧 Норма: {text}\n\n⚖️ Введите количество тонн семян:', reply_markup=reply_kb())
+                    return
+                
+                # Try to find product by name
+                q = normalize_text(text)
+                found = None
+                for r in rows:
+                    name = get_val(r, 'name')
+                    if name and normalize_text(name).find(q) >= 0:
+                        found = r
+                        break
+                
+                if not found:
+                    await msg.reply_text('Препарат не найден. Введите норму вручную в формате "0,5 л/га" или попробуйте другое название:', reply_markup=reply_kb())
+                    return
+                
+                rate_str = get_val(found, 'rate')
+                if not rate_str:
+                    await msg.reply_text('У этого препарата не указана норма расхода. Введите норму вручную в формате "0,5 л/га":', reply_markup=reply_kb())
+                    return
+                
+                # Parse rate and continue to next step
+                components = parse_rate_components(rate_str)
+                if not components:
+                    await msg.reply_text('Не удалось распознать норму расхода. Введите норму вручную в формате "0,5 л/га":', reply_markup=reply_kb())
+                    return
+                
+                calc_mode = context.user_data.get('calc_mode')
+                product_name = get_val(found, 'name')
+                
+                if calc_mode == 'area':
+                    set_user_state(context, STATE_CALC_HECTARES, components=components, product_name=product_name)
+                    await msg.reply_text(f'📊 Препарат: {product_name}\n💧 Норма: {rate_str}\n\n🌾 Введите площадь в гектарах:', reply_markup=reply_kb())
+                elif calc_mode == 'tank':
+                    set_user_state(context, STATE_CALC_WATER_RATE, components=components, product_name=product_name)
+                    await msg.reply_text(f'📊 Препарат: {product_name}\n💧 Норма: {rate_str}\n\n💦 Введите норму воды (л/га):', reply_markup=reply_kb())
+                elif calc_mode == 'seed':
+                    set_user_state(context, STATE_CALC_TONS, components=components, product_name=product_name)
+                    await msg.reply_text(f'📊 Препарат: {product_name}\n💧 Норма: {rate_str}\n\n⚖️ Введите количество тонн семян:', reply_markup=reply_kb())
+                return
+                
+            elif current_state == STATE_CALC_HECTARES:
+                try:
+                    hectares = float(text.replace(',', '.'))
+                    components = context.user_data.get('components', [])
+                    product_name = context.user_data.get('product_name', 'Препарат')
+                    
+                    result = calculate_for_area(components, hectares)
+                    if result:
+                        msg_text = format_calculation_result(result, f"Расчет для {hectares} га")
+                        await msg.reply_html(msg_text, reply_markup=reply_kb())
+                    else:
+                        await msg.reply_text('❌ Не удалось выполнить расчет', reply_markup=reply_kb())
+                    clear_user_state(context)
+                except ValueError:
+                    await msg.reply_text('Введите корректное число гектаров (например: 50 или 12.5):', reply_markup=reply_kb())
+                return
+                
+            elif current_state == STATE_CALC_WATER_RATE:
+                try:
+                    water_rate = float(text.replace(',', '.'))
+                    components = context.user_data.get('components', [])
+                    set_user_state(context, STATE_CALC_TANK_VOLUME, components=components, water_rate=water_rate, 
+                                  product_name=context.user_data.get('product_name'))
+                    await msg.reply_text('🚜 Введите объем бака опрыскивателя (л):', reply_markup=reply_kb())
+                except ValueError:
+                    await msg.reply_text('Введите корректную норму воды (например: 200 или 150.5):', reply_markup=reply_kb())
+                return
+                
+            elif current_state == STATE_CALC_TANK_VOLUME:
+                try:
+                    tank_volume = float(text.replace(',', '.'))
+                    components = context.user_data.get('components', [])
+                    water_rate = context.user_data.get('water_rate', 200)
+                    product_name = context.user_data.get('product_name', 'Препарат')
+                    
+                    result = calculate_for_tank(components, water_rate, tank_volume)
+                    if result:
+                        msg_text = format_tank_calculation_result(result, f"Расчет для бака {tank_volume} л")
+                        await msg.reply_html(msg_text, reply_markup=reply_kb())
+                    else:
+                        await msg.reply_text('❌ Не удалось выполнить расчет', reply_markup=reply_kb())
+                    clear_user_state(context)
+                except ValueError:
+                    await msg.reply_text('Введите корректный объем бака (например: 3000 или 1500.5):', reply_markup=reply_kb())
+                return
+                
+            elif current_state == STATE_CALC_TONS:
+                try:
+                    tons = float(text.replace(',', '.'))
+                    components = context.user_data.get('components', [])
+                    product_name = context.user_data.get('product_name', 'Препарат')
+                    
+                    result = calculate_for_seed(components, tons)
+                    if result:
+                        msg_text = format_calculation_result(result, f"Протравливание {tons} т семян")
+                        await msg.reply_html(msg_text, reply_markup=reply_kb())
+                    else:
+                        await msg.reply_text('❌ Не удалось выполнить расчет', reply_markup=reply_kb())
+                    clear_user_state(context)
+                except ValueError:
+                    await msg.reply_text('Введите корректное количество тонн (например: 25 или 12.5):', reply_markup=reply_kb())
+                return
+                
+        except Exception as e:
+            await msg.reply_text('Произошла ошибка. Попробуйте еще раз.', reply_markup=reply_kb())
+            clear_user_state(context)
+            return
 
+    # Clear state and handle button presses
     if btn == 'подбор пестицида':
+        clear_user_state(context)
         await ensure_data_loaded()
         data = _DATA_CACHE['data']
         build_crops_index(data['rows'])
@@ -623,21 +750,31 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text='📋 <b>Выберите культуру/цели обработки</b>', parse_mode='HTML', reply_markup=crops_page_keyboard(0))
         return
     if btn == 'поиск препарата по названию':
-        context.user_data['mode'] = 'name'
+        clear_user_state(context)
+        set_user_state(context, STATE_AWAITING_NAME)
         if chat_id:
             await context.bot.send_message(chat_id=chat_id, text='🔎 Введите название препарата текстом. Я учту опечатки и раскладку.', reply_markup=reply_kb())
         return
     if btn == 'поиск по дв':
-        context.user_data['mode'] = 'dv'
+        clear_user_state(context)
+        set_user_state(context, STATE_AWAITING_DV)
         if chat_id:
             await context.bot.send_message(chat_id=chat_id, text='🧪 Введите часть названия действующего вещества (например: "флорасулам" или "д.в. 2,4-д")', reply_markup=reply_kb())
         return
     if btn == 'калькулятор расхода препарата':
-        context.user_data['mode'] = 'calc'
+        clear_user_state(context)
+        set_user_state(context, STATE_CALC_MODE)
         if chat_id:
-            await context.bot.send_message(chat_id=chat_id, text='🧮 Введите норму в формате: 0.5 л/га или 500 мл/га', reply_markup=reply_kb())
+            calc_menu = ('🧮 <b>Калькулятор расхода препарата</b>\n\n'
+                        'Выберите тип расчета:\n'
+                        '1️⃣ Расчет по площади (л/га, кг/га)\n'
+                        '2️⃣ Расчет для опрыскивателя (на бак)\n'
+                        '3️⃣ Расчет для протравителя (л/т, кг/т)\n\n'
+                        'Введите номер или название:')
+            await context.bot.send_message(chat_id=chat_id, text=calc_menu, parse_mode='HTML', reply_markup=reply_kb())
         return
     if btn == 'помощь':
+        clear_user_state(context)
         await cmd_help(update, context)
         return
     if btn == 'контакты':
