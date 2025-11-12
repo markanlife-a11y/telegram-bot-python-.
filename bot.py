@@ -1487,33 +1487,7 @@ def main():
     else:
         logger.info("Запуск polling режима...")
         try:
-            # Сначала удаляем webhook если он был установлен
-            logger.info("Удаляем старый webhook (если есть)...")
-            import asyncio
-            async def delete_webhook():
-                try:
-                    await app.bot.delete_webhook(drop_pending_updates=True)
-                    logger.info("Webhook удален")
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить webhook: {e}")
-            
-            asyncio.run(delete_webhook())
-            
             logger.info("Начинаем polling...")
-            # Исправление для Python 3.13+: создаем event loop явно
-
-            try:
-
-                loop = asyncio.get_event_loop()
-
-            except RuntimeError:
-
-                loop = asyncio.new_event_loop()
-
-                asyncio.set_event_loop(loop)
-
-            
-
             app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True
