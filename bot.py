@@ -439,6 +439,112 @@ def build_crops_index(rows: List[Dict[str, Any]]):
 # CALCULATOR FUNCTIONS
 # ============================================================================
 
+# --- Calculator helpers ported from Code.gs ---
+
+def get_pesticides_for_culture_and_mode(rows: List[Dict[str, Any]], culture: str, mode: str) -> List[Dict[str, Any]]:
+    """Filter products by culture and measure required by mode (га for area/tank, т for seed)."""
+    measure_needed = 'т' if mode == 'seed' else 'га'
+    ck = crop_key_for_dedup(culture)
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        crop_col = get_val(r, 'crops')
+        rate = get_val(r, 'rate')
+        if not crop_col or not rate:
+            continue
+        opts = [crop_key_for_dedup(x) for x in split_crops_field(str(crop_col))]
+        if ck not in opts:
+            continue
+        comps = parse_rate_components(rate)
+        if not comps:
+            continue
+        if comps[0].get('measure') == measure_needed:
+            out.append(r)
+    return out
+
+
+def list_crops_for_mode(rows: List[Dict[str, Any]], mode: str) -> List[str]:
+    """Return deduplicated pretty crop labels that have at least one product with proper measure for mode."""
+    measure_needed = 'т' if mode == 'seed' else 'га'
+    seen = {}
+    out: List[str] = []
+    for r in rows:
+        crop_col = get_val(r, 'crops')
+        rate = get_val(r, 'rate')
+        if not crop_col or not rate:
+            continue
+        comps = parse_rate_components(rate)
+        if not comps or comps[0].get('measure') != measure_needed:
+            continue
+        for c in split_crops_field(str(crop_col)):
+            key = crop_key_for_dedup(c)
+            if key not in seen:
+                seen[key] = True
+                out.append(pretty_crop_label(c))
+    out.sort()
+    return out
+
+
+def crops_page_keyboard_for_mode(mode: str, page: int = 0, per: int = 22) -> InlineKeyboardMarkup:
+    """Inline keyboard for crop selection filtered by mode."""
+    data = _DATA_CACHE.get('data') or {'rows': []}
+    rows = data.get('rows', [])
+    lst = list_crops_for_mode(rows, mode)
+    total = len(lst)
+    if total == 0:
+        return InlineKeyboardMarkup([])
+    pages = max(1, (total + per - 1)//per)
+    page = max(0, min(page, pages-1))
+    start = page*per
+    slice_ = lst[start:start+per]
+
+    rows_kb = create_smart_keyboard(
+        slice_,
+        lambda label: InlineKeyboardButton(
+            text=label,
+            callback_data=f'calccrop|m:{mode}|h:{hash32(crop_key_for_dedup(label))}'
+        )
+    )
+
+    if pages > 1:
+        nav: List[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text='⬅️ Назад', callback_data=f'calccroppg|m:{mode}|{page-1}'))
+        nav.append(InlineKeyboardButton(text=f'{page+1}/{pages}', callback_data='noop'))
+        if page < pages-1:
+            nav.append(InlineKeyboardButton(text='Вперёд ➡️', callback_data=f'calccroppg|m:{mode}|{page+1}'))
+        rows_kb.append(nav)
+
+    return InlineKeyboardMarkup(rows_kb)
+
+
+def all_products_keyboard(mode: str, culture: str, rows: List[Dict[str, Any]], page: int = 0, per: int = 20) -> InlineKeyboardMarkup:
+    items = get_pesticides_for_culture_and_mode(rows, culture, mode)
+    names = [get_val(r, 'name') for r in items if get_val(r, 'name')]
+    total = len(names)
+    if total == 0:
+        return InlineKeyboardMarkup([])
+    pages = max(1, (total + per - 1)//per)
+    page = max(0, min(page, pages-1))
+    start = page*per
+    slice_ = names[start:start+per]
+
+    def btn_builder(name: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            text=name,
+            callback_data=f"calc|pick|m:{mode}|h:{hash32(normalize_text(name))}"
+        )
+
+    kb_rows = create_smart_keyboard(slice_, btn_builder)
+    # nav
+    nav: List[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton('⬅️ Назад', callback_data=f'calc|allprods|m:{mode}|p:{page-1}'))
+    nav.append(InlineKeyboardButton(f'{page+1}/{pages}', callback_data='noop'))
+    if page < pages-1:
+        nav.append(InlineKeyboardButton('Вперёд ➡️', callback_data=f'calc|allprods|m:{mode}|p:{page+1}'))
+    kb_rows.append(nav)
+    return InlineKeyboardMarkup(kb_rows)
+
 def parse_rate_components(rate_string: str) -> List[Dict[str, Any]]:
     """
     Parse rate string into components.
@@ -518,22 +624,78 @@ def smart_convert(value: float, unit: str) -> tuple:
     if unit == 'мл' and value >= 1000:
         return (value / 1000, 'л')
     elif unit == 'г' and value >= 1000:
-        return (value / 1000, 'кг')
-    else:
-        return (value, unit)
-
-
-def format_number(value: float, precision: int) -> str:
-    """
-    Format number with comma as decimal separator and given precision.
     
-    Example: format_number(123.45, 1) -> "123,5"
-    """
+    # Extract first number from string
+    import re
+    match = re.search(r'\d+(?:\.\d+)?', s)
+    if match:
+        try:
+            return float(match.group())
+        except ValueError:
+            return float('nan')
+    
+    return float('nan')
+
+
+def format_number(num: float, precision: int = 2) -> str:
+    """Format number with given precision, removing unnecessary zeros."""
     if precision == 0:
-        return str(int(round(value)))
+        return str(int(round(num)))
+    formatted = f"{num:.{precision}f}"
+    # Remove trailing zeros
+    if '.' in formatted:
+        formatted = formatted.rstrip('0').rstrip('.')
+    return formatted
+
+
+def format_num_prec(num: float, precision: int) -> str:
+    """Format number with exact precision from Code.gs."""
+    if precision <= 0:
+        return str(int(round(num)))
+    
+    formatted = f"{num:.{precision}f}"
+    return formatted
+
+
+def smart_convert(value: float, unit: str, precision: int = 2) -> Dict[str, Any]:
+    """Smart unit conversion from Code.gs - converts ml to l and g to kg for large values."""
+    if unit.lower() == 'мл':
+        if value >= 1000:
+            # Convert to liters
+            new_value = value / 1000
+            return {
+                'value': new_value,
+                'unit': 'л',
+                'str': format_num_prec(new_value, precision) + ' л'
+            }
+        else:
+            return {
+                'value': value,
+                'unit': 'мл',
+                'str': format_num_prec(value, precision) + ' мл'
+            }
+    elif unit.lower() == 'г':
+        if value >= 1000:
+            # Convert to kilograms
+            new_value = value / 1000
+            return {
+                'value': new_value,
+                'unit': 'кг',
+                'str': format_num_prec(new_value, precision) + ' кг'
+            }
+        else:
+            return {
+                'value': value,
+                'unit': 'г',
+                'str': format_num_prec(value, precision) + ' г'
+            }
     else:
-        formatted = f"{value:.{precision}f}"
-        return formatted.replace('.', ',')
+        # No conversion needed for л and кг
+        return {
+            'value': value,
+            'unit': unit.lower(),
+            'str': format_num_prec(value, precision) + ' ' + unit.lower()
+        }.replace('.', ',')
 
 
 def calculate_for_area(rate_components: List[Dict[str, Any]], hectares: float) -> List[Dict[str, Any]]:
@@ -671,6 +833,11 @@ STATE_CALC_HECTARES = 'calculator_awaiting_hectares'
 STATE_CALC_WATER_RATE = 'calculator_awaiting_water_rate'
 STATE_CALC_TANK_VOLUME = 'calculator_awaiting_tank_volume'
 STATE_CALC_TONS = 'calculator_awaiting_tons'
+STATE_CALC_PESTICIDE_SELECT = 'calculator_pesticide_select'
+STATE_CALC_WATER_RATE_INPUT = 'calculator_water_rate_input'
+STATE_CALC_TANK_VOLUME_INPUT = 'calculator_tank_volume_input'
+STATE_CALC_AMOUNT_INPUT = 'calculator_amount_input'
+STATE_CALC_CUSTOM_RATE_INPUT = 'calculator_custom_rate_input'
 
 
 def clear_user_state(context: ContextTypes.DEFAULT_TYPE):
@@ -1023,13 +1190,17 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rows = _DATA_CACHE['data']['rows']
                 pesticides = get_pesticides_for_culture_and_mode(rows, culture, calc_mode)
                 
-                # Fuzzy search for pesticide
-                query = normalize_text(text)
-                matches = []
-                for p in pesticides:
-                    name = get_val(p, 'name')
-                    if name and normalize_text(name).find(query) >= 0:
-                        matches.append(p)
+                # Fuzzy search with layout/translit
+                import difflib
+                q0 = normalize_text(text)
+                to_en, to_ru = switch_layout(text)
+                variants = {q0, normalize_text(to_en), normalize_text(to_ru), normalize_text(translit_simple(text))}
+                def score_name(name: str) -> float:
+                    b = normalize_text(name)
+                    return max(difflib.SequenceMatcher(None, v, b).ratio() for v in variants)
+                scored = [(p, score_name(get_val(p,'name'))) for p in pesticides if get_val(p,'name')]
+                scored.sort(key=lambda x: x[1], reverse=True)
+                matches = [p for p,s in scored if s >= 0.55][:10]
                 
                 if len(matches) == 1:
                     # Exact match found
@@ -1075,22 +1246,28 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                 elif len(matches) > 1:
                     # Multiple matches - show options
-                    pesticide_names = [get_val(p, 'name') for p in matches[:5]]  # Limit to 5
+                    pesticide_names = [get_val(p, 'name') for p in matches]
                     keyboard_rows = create_smart_keyboard(
                         pesticide_names,
-                        lambda name: f"calc_pesticide:{name}"
+                        lambda name: InlineKeyboardButton(
+                            text=name,
+                            callback_data=f"calc|pick|m:{calc_mode}|h:{hash32(normalize_text(name))}"
+                        )
                     )
+                    # Add "All products" row
+                    keyboard_rows.append([InlineKeyboardButton('📋 Все доступные препараты', callback_data=f'calc|allprods|m:{calc_mode}|p:0')])
                     reply_markup = InlineKeyboardMarkup(keyboard_rows)
                     
                     await msg.reply_html(
-                        f'🔍 <b>Найдено несколько препаратов:</b>\n\nВыберите нужный:',
+                        '🔍 <b>Найдено несколько препаратов:</b>\n\nВыберите нужный:',
                         reply_markup=reply_markup
                     )
                 else:
-                    # No matches
+                    # No matches — suggest full list
+                    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('📋 Все доступные препараты', callback_data=f'calc|allprods|m:{calc_mode}|p:0')]])
                     await msg.reply_text(
-                        '❌ Препарат не найден для этой культуры. Попробуйте другое название или выберите из списка "Все доступные препараты".',
-                        reply_markup=reply_kb()
+                        '❌ Препарат не найден для этой культуры. Нажмите кнопку ниже, чтобы увидеть список доступных.',
+                        reply_markup=keyboard
                     )
                 return
             
@@ -1320,6 +1497,29 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except ValueError:
                     await msg.reply_text('Введите корректное количество тонн (например: 25 или 12.5):', reply_markup=reply_kb())
                 return
+            
+            elif current_state == STATE_CALC_CUSTOM_RATE_INPUT:
+                # Accept a number, update first component and ask for amount again
+                try:
+                    val = parse_number(text)
+                    if val != val:  # NaN
+                        raise ValueError
+                    comps = context.user_data.get('components', [])
+                    comps = apply_custom_rate(comps, val)
+                    context.user_data['components'] = comps
+                    mode = context.user_data.get('calc_mode', 'area')
+                    if mode == 'tank':
+                        set_user_state(context, STATE_CALC_WATER_RATE_INPUT, **context.user_data)
+                        await msg.reply_text('💦 Укажите норму воды (л/га):', reply_markup=reply_kb())
+                    elif mode == 'area':
+                        set_user_state(context, STATE_CALC_AMOUNT_INPUT, **context.user_data)
+                        await msg.reply_text('📏 Укажите площадь (га):', reply_markup=reply_kb())
+                    else:
+                        set_user_state(context, STATE_CALC_AMOUNT_INPUT, **context.user_data)
+                        await msg.reply_text('🌾 Укажите количество семян (т):', reply_markup=reply_kb())
+                except Exception:
+                    await msg.reply_text('Введите число, например 0.5', reply_markup=reply_kb())
+                return
                 
         except Exception as e:
             await msg.reply_text('Произошла ошибка. Попробуйте еще раз.', reply_markup=reply_kb())
@@ -1349,15 +1549,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if btn == 'калькулятор расхода препарата':
         clear_user_state(context)
-        set_user_state(context, STATE_CALC_MODE)
         if chat_id:
-            calc_menu = ('🧮 <b>Калькулятор расхода препарата</b>\n\n'
-                        'Выберите тип расчета:\n'
-                        'Расчет по площади (л/га, кг/га)\n'
-                        'Расчет для опрыскивателя (на бак)\n'
-                        'Расчет для протравителя (л/т, кг/т)\n\n'
-                        'Введите номер или название:')
-            await context.bot.send_message(chat_id=chat_id, text=calc_menu, parse_mode='HTML', reply_markup=reply_kb())
+            # Show mode selection with inline buttons like in Code.gs
+            calc_menu = '🧮 Выберите режим расчёта'
+            rows_calc = [
+                [InlineKeyboardButton('Рассчитать по площади', callback_data='calc|mode|area')],
+                [InlineKeyboardButton('Рассчитать по объёму бака', callback_data='calc|mode|tank')],
+                [InlineKeyboardButton('Рассчитать норму протравителя', callback_data='calc|mode|seed')]
+            ]
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text=calc_menu, 
+                reply_markup=InlineKeyboardMarkup(rows_calc)
+            )
         return
     if btn == 'помощь':
         clear_user_state(context)
@@ -1399,9 +1603,149 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await q.answer()
     data = q.data or ''
+
+    # --- Calculator callback flow ---
+    if data.startswith('calc|'):
+        parts = data.split('|')
+        sub = parts[1] if len(parts) > 1 else ''
+        if sub == 'mode':
+            mode = parts[2] if len(parts) > 2 else 'area'
+            # Show crop list filtered by mode
+            await ensure_data_loaded()
+            await q.message.edit_text(
+                text='📋 Выберите культуру для расчёта',
+                reply_markup=crops_page_keyboard_for_mode(mode, 0)
+            )
+            # Save mode only; culture will be saved later
+            set_user_state(context, STATE_CALC_PESTICIDE_SELECT, calc_mode=mode)
+            return
+    if data.startswith('calccroppg|'):
+        # Format: calccroppg|m:<mode>|<page>
+        try:
+            _, mode_part, page_str = data.split('|', 2)
+            mode = mode_part[2:]
+            page = int(page_str)
+        except Exception:
+            mode = 'area'
+            page = 0
+        await q.message.edit_text(
+            text='📋 Выберите культуру для расчёта',
+            reply_markup=crops_page_keyboard_for_mode(mode, page)
+        )
+        return
+    if data.startswith('calccrop|'):
+        # Format: calccrop|m:<mode>|h:<hash>
+        try:
+            parts = data.split('|')
+            mode = parts[1][2:]
+            h = parts[2][2:]
+        except Exception:
+            mode = 'area'
+            h = ''
+        await ensure_data_loaded()
+        rows = _DATA_CACHE['data']['rows']
+        # Find crop by hash in filtered list
+        crop_label = None
+        for c in list_crops_for_mode(rows, mode):
+            if hash32(crop_key_for_dedup(c)) == h:
+                crop_label = c
+                break
+        if not crop_label:
+            await q.message.edit_text(text='❌ Культура не найдена')
+            return
+        # Save culture and prompt for pesticide name with extra button
+        set_user_state(context, STATE_CALC_PESTICIDE_SELECT, calc_mode=mode, culture=crop_label)
+        await q.message.edit_text(
+            text=(
+                '✅ Культура выбрана\n\n'
+                f'🌱 {crop_label}\n\n'
+                '📝 Введите название препарата сообщением или выберите из списка.'
+            ),
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('📋 Все доступные препараты', callback_data=f'calc|allprods|m:{mode}|p:0')]])
+        )
+        return
+
     if data.startswith('croppg|'):
         page = int(data.split('|',1)[1])
         await q.message.edit_reply_markup(reply_markup=crops_page_keyboard(page))
+        return
+
+    # Remaining calculator callbacks
+    if data.startswith('calc|allprods|'):
+        # calc|allprods|m:<mode>|p:<page>
+        try:
+            _, _, mpart, ppart = data.split('|', 3)
+            mode = mpart[2:]
+            page = int(ppart[2:])
+        except Exception:
+            mode = context.user_data.get('calc_mode','area')
+            page = 0
+        culture = context.user_data.get('culture')
+        await ensure_data_loaded()
+        rows = _DATA_CACHE['data']['rows']
+        if not culture:
+            await q.message.edit_text('❌ Культура не выбрана')
+            return
+        await q.message.edit_text(
+            text='📦 Выберите препарат из списка',
+            reply_markup=all_products_keyboard(mode, culture, rows, page)
+        )
+        return
+
+    if data.startswith('calc|pick|'):
+        # calc|pick|m:<mode>|h:<hash>
+        try:
+            _, _, mpart, hpart = data.split('|', 3)
+            mode = mpart[2:]
+            hh = hpart[2:]
+        except Exception:
+            mode = context.user_data.get('calc_mode','area')
+            hh = ''
+        culture = context.user_data.get('culture')
+        await ensure_data_loaded()
+        rows = _DATA_CACHE['data']['rows']
+        candidates = get_pesticides_for_culture_and_mode(rows, culture, mode)
+        picked = None
+        for r in candidates:
+            nm = get_val(r, 'name')
+            if nm and hash32(normalize_text(nm)) == hh:
+                picked = r
+                break
+        if not picked:
+            await q.message.edit_text('❌ Препарат не найден')
+            return
+        pesticide_name = get_val(picked, 'name')
+        rate_str = get_val(picked, 'rate')
+        comps = parse_rate_components(rate_str)
+        if not comps:
+            await q.message.edit_text('❌ Не удалось распознать норму расхода')
+            return
+        # Save in state and prompt next input
+        if mode == 'tank':
+            set_user_state(context, STATE_CALC_WATER_RATE_INPUT, calc_mode=mode, culture=culture, pesticide_name=pesticide_name, rate_str=rate_str, components=comps)
+            await q.message.edit_text(
+                text=f'✅ Препарат: {pesticide_name}\n💧 Норма: {rate_str}\n\n💦 Укажите норму воды (л/га):',
+                reply_markup=None
+            )
+        elif mode == 'area':
+            set_user_state(context, STATE_CALC_AMOUNT_INPUT, calc_mode=mode, culture=culture, pesticide_name=pesticide_name, rate_str=rate_str, components=comps)
+            await q.message.edit_text(
+                text=f'✅ Препарат: {pesticide_name}\n💧 Норма: {rate_str}\n\n📏 Укажите площадь (га):',
+                reply_markup=None
+            )
+        else:  # seed
+            set_user_state(context, STATE_CALC_AMOUNT_INPUT, calc_mode=mode, culture=culture, pesticide_name=pesticide_name, rate_str=rate_str, components=comps)
+            await q.message.edit_text(
+                text=f'✅ Препарат: {pesticide_name}\n💧 Норма: {rate_str}\n\n🌾 Укажите количество семян (т):',
+                reply_markup=None
+            )
+        return
+
+    if data.startswith('calc|other_rate'):
+        # Ask for custom rate number
+        set_user_state(context, STATE_CALC_CUSTOM_RATE_INPUT)
+        await q.message.edit_text('🔄 Введите свою норму (число). Она заменит первую норму препарата.', reply_markup=None)
         return
     if data.startswith('crop|'):
         await ensure_data_loaded()
