@@ -1429,11 +1429,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    # Фикс для Python 3.13+ и Windows: используем WindowsSelectorEventLoopPolicy
-    import sys
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
     logger = logging.getLogger(__name__)
     
     logger.info("Запуск Telegram бота...")
@@ -1505,6 +1500,20 @@ def main():
             asyncio.run(delete_webhook())
             
             logger.info("Начинаем polling...")
+            # Исправление для Python 3.13+: создаем event loop явно
+
+            try:
+
+                loop = asyncio.get_event_loop()
+
+            except RuntimeError:
+
+                loop = asyncio.new_event_loop()
+
+                asyncio.set_event_loop(loop)
+
+            
+
             app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True
