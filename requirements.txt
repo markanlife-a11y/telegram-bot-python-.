@@ -1,12 +1,3 @@
-# --- Основа бота ---
-aiogram~=3.5.0        # Самая современная библиотека для Telegram-ботов
-fastapi~=0.111.0      # Веб-сервер для связи с Render и Telegram (вместо doGet/doPost)
-uvicorn~=0.29.0       # Сервер, который запускает FastAPI
-
-# --- Работа с Google Таблицами ---
-gspread~=6.0.2        # Главная библиотека для Google Sheets
-google-auth~=2.29.0   # Для аутентификации
-google-auth-oauthlib~=1.2.0
-
-# --- (Опционально) Для Fuzzy-поиска (как в Code.gs) ---
-thefuzz~=0.22.1      # Библиотека для нечеткого поиска (вместо вашей функции lev)
+python-telegram-bot==20.7
+gspread==6.0.2
+google-auth==2.35.0
