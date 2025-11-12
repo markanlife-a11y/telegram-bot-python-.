@@ -913,6 +913,179 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 clear_user_state(context)
                 return
                 
+            # Enhanced calculator states
+            elif current_state == STATE_CALC_PESTICIDE_SELECT:
+                # Handle text input for pesticide search during enhanced calculator
+                culture = context.user_data.get('culture')
+                calc_mode = context.user_data.get('calc_mode')
+                
+                if not culture or not calc_mode:
+                    await msg.reply_text('❌ Неверное состояние. Начните заново.', reply_markup=reply_kb())
+                    clear_user_state(context)
+                    return
+                
+                await ensure_data_loaded()
+                rows = _DATA_CACHE['data']['rows']
+                pesticides = get_pesticides_for_culture_and_mode(rows, culture, calc_mode)
+                
+                # Fuzzy search for pesticide
+                query = normalize_text(text)
+                matches = []
+                for p in pesticides:
+                    name = get_val(p, 'name')
+                    if name and normalize_text(name).find(query) >= 0:
+                        matches.append(p)
+                
+                if len(matches) == 1:
+                    # Exact match found
+                    selected_pesticide = matches[0]
+                    pesticide_name = get_val(selected_pesticide, 'name')
+                    rate_str = get_val(selected_pesticide, 'rate')
+                    
+                    if not rate_str:
+                        await msg.reply_text('❌ У этого препарата не указана норма расхода', reply_markup=reply_kb())
+                        return
+                    
+                    components = parse_rate_components(rate_str)
+                    if not components:
+                        await msg.reply_text('❌ Не удалось распознать норму расхода', reply_markup=reply_kb())
+                        return
+                    
+                    # Set state for amount input
+                    if calc_mode == 'tank':
+                        set_user_state(context, STATE_CALC_WATER_RATE_INPUT, 
+                                      calc_mode=calc_mode, culture=culture, 
+                                      pesticide_name=pesticide_name, rate_str=rate_str, 
+                                      components=components)
+                        prompt = '💦 Укажите норму раствора (воды) на 1 га, например: 200'
+                    else:
+                        set_user_state(context, STATE_CALC_AMOUNT_INPUT, 
+                                      calc_mode=calc_mode, culture=culture, 
+                                      pesticide_name=pesticide_name, rate_str=rate_str, 
+                                      components=components)
+                        if calc_mode == 'area':
+                            prompt = '📏 Укажите площадь обработки в га, например: 50'
+                        elif calc_mode == 'seed':
+                            prompt = '🌾 Укажите количество семян в тоннах, например: 10'
+                        else:
+                            prompt = 'Введите количество'
+                    
+                    message_text = (
+                        '✅ <b>Препарат выбран</b>\n\n'
+                        f'🌱 <i>Культура:</i> <b>{culture}</b>\n'
+                        f'📦 <i>Препарат:</i> <b>{pesticide_name}</b>\n\n'
+                        f'{prompt}'
+                    )
+                    await msg.reply_html(message_text, reply_markup=reply_kb())
+                    
+                elif len(matches) > 1:
+                    # Multiple matches - show options
+                    pesticide_names = [get_val(p, 'name') for p in matches[:5]]  # Limit to 5
+                    keyboard_rows = create_smart_keyboard(
+                        pesticide_names,
+                        lambda name: f"calc_pesticide:{name}"
+                    )
+                    reply_markup = InlineKeyboardMarkup(keyboard_rows)
+                    
+                    await msg.reply_html(
+                        f'🔍 <b>Найдено несколько препаратов:</b>\n\nВыберите нужный:',
+                        reply_markup=reply_markup
+                    )
+                else:
+                    # No matches
+                    await msg.reply_text(
+                        '❌ Препарат не найден для этой культуры. Попробуйте другое название или выберите из списка "Все доступные препараты".',
+                        reply_markup=reply_kb()
+                    )
+                return
+            
+            elif current_state == STATE_CALC_WATER_RATE_INPUT:
+                try:
+                    water_rate = float(text.replace(',', '.'))
+                    components = context.user_data.get('components', [])
+                    culture = context.user_data.get('culture')
+                    pesticide_name = context.user_data.get('pesticide_name')
+                    rate_str = context.user_data.get('rate_str')
+                    
+                    set_user_state(context, STATE_CALC_TANK_VOLUME_INPUT, 
+                                  calc_mode='tank', culture=culture, 
+                                  pesticide_name=pesticide_name, rate_str=rate_str,
+                                  components=components, water_rate=water_rate)
+                    
+                    await msg.reply_text('🚜 Введите объем бака опрыскивателя (л), например: 3000', reply_markup=reply_kb())
+                except ValueError:
+                    await msg.reply_text('Введите корректную норму воды (например: 200 или 150.5):', reply_markup=reply_kb())
+                return
+            
+            elif current_state == STATE_CALC_TANK_VOLUME_INPUT:
+                try:
+                    tank_volume = float(text.replace(',', '.'))
+                    components = context.user_data.get('components', [])
+                    water_rate = context.user_data.get('water_rate', 200)
+                    culture = context.user_data.get('culture')
+                    pesticide_name = context.user_data.get('pesticide_name')
+                    rate_str = context.user_data.get('rate_str')
+                    
+                    result = calculate_for_tank(components, water_rate, tank_volume)
+                    result['water_rate'] = water_rate
+                    result['tank_volume'] = tank_volume
+                    
+                    if result and result.get('components'):
+                        msg_text = format_calculator_result_card('tank', culture, pesticide_name, rate_str, tank_volume, result)
+                        
+                        # Add "Other rate" button
+                        keyboard = [[InlineKeyboardButton('🔄 Другая норма', callback_data='calc_custom_rate')]]
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        
+                        await msg.reply_html(msg_text, reply_markup=reply_markup)
+                    else:
+                        await msg.reply_text('❌ Не удалось выполнить расчет', reply_markup=reply_kb())
+                    
+                    clear_user_state(context)
+                except ValueError:
+                    await msg.reply_text('Введите корректный объем бака (например: 3000 или 1500.5):', reply_markup=reply_kb())
+                return
+            
+            elif current_state == STATE_CALC_AMOUNT_INPUT:
+                try:
+                    amount = float(text.replace(',', '.'))
+                    components = context.user_data.get('components', [])
+                    calc_mode = context.user_data.get('calc_mode')
+                    culture = context.user_data.get('culture')
+                    pesticide_name = context.user_data.get('pesticide_name')
+                    rate_str = context.user_data.get('rate_str')
+                    
+                    if calc_mode == 'area':
+                        result = calculate_for_area(components, amount)
+                    elif calc_mode == 'seed':
+                        result = calculate_for_seed(components, amount)
+                    else:
+                        await msg.reply_text('❌ Неверный режим расчета', reply_markup=reply_kb())
+                        clear_user_state(context)
+                        return
+                    
+                    if result:
+                        msg_text = format_calculator_result_card(calc_mode, culture, pesticide_name, rate_str, amount, result)
+                        
+                        # Add "Other rate" button
+                        keyboard = [[InlineKeyboardButton('🔄 Другая норма', callback_data='calc_custom_rate')]]
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        
+                        await msg.reply_html(msg_text, reply_markup=reply_markup)
+                    else:
+                        await msg.reply_text('❌ Не удалось выполнить расчет', reply_markup=reply_kb())
+                    
+                    clear_user_state(context)
+                except ValueError:
+                    if context.user_data.get('calc_mode') == 'area':
+                        await msg.reply_text('Введите корректное число гектаров (например: 50 или 12.5):', reply_markup=reply_kb())
+                    elif context.user_data.get('calc_mode') == 'seed':
+                        await msg.reply_text('Введите корректное количество тонн (например: 25 или 12.5):', reply_markup=reply_kb())
+                    else:
+                        await msg.reply_text('Введите корректное число:', reply_markup=reply_kb())
+                return
+            
+            # Legacy calculator states (keep for backward compatibility)
             elif current_state == STATE_CALC_MODE:
                 # Calculator mode selection
                 mode_text = text.strip().lower()
