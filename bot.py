@@ -1172,7 +1172,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for idx, c in enumerate(contacts):
                 label = c.get('Филиал/Офис') or 'Офис'
                 buttons.append(InlineKeyboardButton(text=label, callback_data=f'contact|{idx}'))
-            rows_kb: List[List[InlineKeyboardButton]]] = []
+            rows_kb: List[List[InlineKeyboardButton]] = []
             cur: List[InlineKeyboardButton] = []
             for b in buttons:
                 if len(b.text) > 18:
