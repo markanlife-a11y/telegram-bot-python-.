@@ -7,10 +7,42 @@ from typing import Dict, Any, List, Tuple, Callable
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
+# Global variables for chat logging
+_DEBUG_CHAT_ID = None
+_BOT_INSTANCE = None
+
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     level=logging.INFO
 )
+
+# Custom logging handler for sending logs to chat
+class ChatLogHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.setLevel(logging.DEBUG)
+        
+    def emit(self, record):
+        if _DEBUG_CHAT_ID and _BOT_INSTANCE:
+            try:
+                log_message = self.format(record)
+                # Truncate very long messages
+                if len(log_message) > 4000:
+                    log_message = log_message[:4000] + "..."
+                
+                # Send log message to chat asynchronously
+                asyncio.create_task(
+                    _BOT_INSTANCE.send_message(
+                        chat_id=_DEBUG_CHAT_ID, 
+                        text=f"🐛 <code>{log_message}</code>", 
+                        parse_mode='HTML'
+                    )
+                )
+            except Exception:
+                pass  # Ignore errors in logging to avoid recursion
+
+# Create chat log handler
+_chat_log_handler = ChatLogHandler()
 
 
 def clean_btn(text: str) -> str:
@@ -821,37 +853,15 @@ async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_dbg_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id if update.effective_chat else None
     os.environ['DEBUG'] = '1'
-    
-    # Set logging level to DEBUG for more detailed logs
-    logging.getLogger().setLevel(logging.DEBUG)
-    
     if chat_id:
-        debug_info = (
-            '🐛 <b>Режим отладки включен</b>\n\n'
-            '✅ DEBUG=1\n'
-            '✅ Детальное логирование активно\n'
-            '✅ Логи callback-ов включены\n\n'
-            'Теперь отправляйте мне ошибки для анализа.'
-        )
-        await context.bot.send_message(chat_id=chat_id, text=debug_info, parse_mode='HTML')
+        await context.bot.send_message(chat_id=chat_id, text='DEBUG=1')
 
 
 async def cmd_dbg_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id if update.effective_chat else None
     os.environ['DEBUG'] = '0'
-    
-    # Reset logging level to INFO
-    logging.getLogger().setLevel(logging.INFO)
-    
     if chat_id:
-        debug_info = (
-            '🔇 <b>Режим отладки выключен</b>\n\n'
-            '❌ DEBUG=0\n'
-            '❌ Детальное логирование отключено\n'
-            '❌ Логи callback-ов отключены\n\n'
-            'Обычный режим работы восстановлен.'
-        )
-        await context.bot.send_message(chat_id=chat_id, text=debug_info, parse_mode='HTML')
+        await context.bot.send_message(chat_id=chat_id, text='DEBUG=0')
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1297,18 +1307,15 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if btn == 'калькулятор расхода препарата':
         clear_user_state(context)
+        set_user_state(context, STATE_CALC_MODE)
         if chat_id:
-            calc_menu = '🧮 <b>Калькулятор расхода препарата</b>\n\nВыберите тип расчета:'
-            
-            # Create inline keyboard with calculation mode buttons
-            keyboard = [
-                [InlineKeyboardButton('1️⃣ Расчет по площади (л/га, кг/га)', callback_data='calc_mode:area')],
-                [InlineKeyboardButton('2️⃣ Расчет для опрыскивателя (на бак)', callback_data='calc_mode:tank')],
-                [InlineKeyboardButton('3️⃣ Расчет для протравителя (л/т, кг/т)', callback_data='calc_mode:seed')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await context.bot.send_message(chat_id=chat_id, text=calc_menu, parse_mode='HTML', reply_markup=reply_markup)
+            calc_menu = ('🧮 <b>Калькулятор расхода препарата</b>\n\n'
+                        'Выберите тип расчета:\n'
+                        'Расчет по площади (л/га, кг/га)\n'
+                        'Расчет для опрыскивателя (на бак)\n'
+                        'Расчет для протравителя (л/т, кг/т)\n\n'
+                        'Введите номер или название:')
+            await context.bot.send_message(chat_id=chat_id, text=calc_menu, parse_mode='HTML', reply_markup=reply_kb())
         return
     if btn == 'помощь':
         clear_user_state(context)
@@ -1450,34 +1457,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg += '\n' + k + ': ' + vv
         await q.message.edit_text(text=msg, parse_mode='HTML')
         return
-    
-    # Handle calculator mode selection
-    if data.startswith('calc_mode:'):
-        mode = data.split(':', 1)[1]
-        clear_user_state(context)
-        
-        if mode == 'area':
-            prompt_text = '🌱 Введите название препарата для расчета по площади:'
-            set_user_state(context, STATE_CALC_CROP, calc_mode='area')
-        elif mode == 'tank':
-            prompt_text = '🌱 Введите название препарата для расчета на опрыскиватель:'
-            set_user_state(context, STATE_CALC_CROP, calc_mode='tank')
-        elif mode == 'seed':
-            prompt_text = '🌱 Введите название препарата для протравливания:'
-            set_user_state(context, STATE_CALC_CROP, calc_mode='seed')
-        else:
-            prompt_text = '🌱 Введите название препарата:'
-            set_user_state(context, STATE_CALC_CROP, calc_mode=mode)
-        
-        await q.message.edit_text(text=prompt_text, parse_mode='HTML')
-        return
-    
-    # Debug logging for unhandled callbacks
-    debug_mode = os.getenv('DEBUG', '0') == '1'
-    if debug_mode:
-        logger = logging.getLogger(__name__)
-        logger.info(f"Необработанный callback: {data}")
-    
     await q.message.reply_text(f'CB: {data}')
 
 
@@ -1540,7 +1519,33 @@ def main():
     else:
         logger.info("Запуск polling режима...")
         try:
+            # Сначала удаляем webhook если он был установлен
+            logger.info("Удаляем старый webhook (если есть)...")
+            import asyncio
+            async def delete_webhook():
+                try:
+                    await app.bot.delete_webhook(drop_pending_updates=True)
+                    logger.info("Webhook удален")
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить webhook: {e}")
+            
+            asyncio.run(delete_webhook())
+            
             logger.info("Начинаем polling...")
+            # Исправление для Python 3.13+: создаем event loop явно
+
+            try:
+
+                loop = asyncio.get_event_loop()
+
+            except RuntimeError:
+
+                loop = asyncio.new_event_loop()
+
+                asyncio.set_event_loop(loop)
+
+            
+
             app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True
@@ -1556,3 +1561,4 @@ if __name__ == '__main__':
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}")
         raise
+
