@@ -614,7 +614,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.message.reply_text(f'CB: {data}')
 
 
-async def main_async():
+def main():
     token = os.getenv('TELEGRAM_TOKEN')
     if not token:
         raise RuntimeError('TELEGRAM_TOKEN not set')
@@ -647,4 +647,4 @@ async def main_async():
 
 
 if __name__ == '__main__':
-    asyncio.run(main_async())
+    main()
