@@ -753,6 +753,54 @@ def format_tank_calculation_result(result: Dict[str, Any], title: str = "") -> s
     return "\n".join(lines)
 
 
+def create_smart_keyboard(items: List[str], callback_func) -> List[List[InlineKeyboardButton]]:
+    """
+    Smart button grouping: long labels occupy full row, short labels go two per row.
+    Preserves order but groups short elements for compactness.
+    """
+    rows = []
+    MAX_BUTTON_LENGTH = 20  # If longer than 20 chars - full row (for mobile screen)
+    
+    # Create all buttons with indices
+    buttons = []
+    for i, item in enumerate(items):
+        btn = callback_func(item)
+        buttons.append({
+            'btn': btn,
+            'text': btn.text or '',
+            'index': i,
+            'used': False
+        })
+    
+    # Group with smart logic
+    for i in range(len(buttons)):
+        if buttons[i]['used']:
+            continue
+        
+        current = buttons[i]
+        current['used'] = True
+        
+        # If long - full row
+        if len(current['text']) > MAX_BUTTON_LENGTH:
+            rows.append([current['btn']])
+        else:
+            # Short - look for pair
+            row = [current['btn']]
+            
+            # Look for next short button (not necessarily immediately next)
+            for j in range(i + 1, len(buttons)):
+                if buttons[j]['used']:
+                    continue
+                if len(buttons[j]['text']) <= MAX_BUTTON_LENGTH:
+                    row.append(buttons[j]['btn'])
+                    buttons[j]['used'] = True
+                    break
+            
+            rows.append(row)
+    
+    return rows
+
+
 def crops_page_keyboard(page: int = 0, per: int = 22) -> InlineKeyboardMarkup:
     total = len(_CROPS_CACHE['list'])
     if total == 0:
@@ -761,32 +809,26 @@ def crops_page_keyboard(page: int = 0, per: int = 22) -> InlineKeyboardMarkup:
     page = max(0, min(page, pages-1))
     start = page*per
     slice_ = _CROPS_CACHE['list'][start:start+per]
-    rows: List[List[InlineKeyboardButton]] = []
-    # Smart grouping: long labels occupy full row, short labels go two per row
-    cur_pair: List[InlineKeyboardButton] = []
-    for label in slice_:
-        h = hash32(crop_key_for_dedup(label))
-        btn = InlineKeyboardButton(text=label, callback_data=f'crop|h:{h}')
-        if len(label) > 18:
-            if cur_pair:
-                rows.append(cur_pair)
-                cur_pair = []
-            rows.append([btn])
-        else:
-            cur_pair.append(btn)
-            if len(cur_pair) == 2:
-                rows.append(cur_pair)
-                cur_pair = []
-    if cur_pair:
-        rows.append(cur_pair)
-    if pages>1:
+    
+    # Use smart keyboard grouping
+    rows = create_smart_keyboard(
+        slice_,
+        lambda label: InlineKeyboardButton(
+            text=label, 
+            callback_data=f'crop|h:{hash32(crop_key_for_dedup(label))}'
+        )
+    )
+    
+    # Add navigation
+    if pages > 1:
         nav = []
-        if page>0:
+        if page > 0:
             nav.append(InlineKeyboardButton(text='⬅️ Назад', callback_data=f'croppg|{page-1}'))
         nav.append(InlineKeyboardButton(text=f'{page+1}/{pages}', callback_data='noop'))
-        if page<pages-1:
+        if page < pages-1:
             nav.append(InlineKeyboardButton(text='Вперёд ➡️', callback_data=f'croppg|{page+1}'))
         rows.append(nav)
+    
     return InlineKeyboardMarkup(rows)
 
 
