@@ -639,7 +639,7 @@ async def main_async():
         await app.initialize()
         await app.start()
         await app.bot.set_webhook(url=public_url + path, allowed_updates=None)
-        await app.run_webhook(listen='0.0.0.0', port=port, webhook_path=path)
+        await app.run_webhook(listen='0.0.0.0', port=port, webhook_url=path)
     else:
         await app.initialize()
         await app.start()
