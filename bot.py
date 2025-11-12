@@ -759,13 +759,26 @@ def crops_page_keyboard(page: int = 0, per: int = 22) -> InlineKeyboardMarkup:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger = logging.getLogger(__name__)
     chat_id = update.effective_chat.id if update.effective_chat else None
+    logger.info(f"Получена команда /start от пользователя {chat_id}")
+    
     welcome = '👋 <b>Добро пожаловать!</b>\nЭтот бот поможет быстро подобрать пестицид по вашей культуре и вредному объекту, а также найти препарат по названию. Выберите действие на клавиатуре ниже.'
     if chat_id:
-        await ensure_data_loaded()
-        data = _DATA_CACHE['data']
-        build_crops_index(data['rows'])
-        await context.bot.send_message(chat_id=chat_id, text=welcome, parse_mode='HTML', reply_markup=reply_kb())
+        try:
+            logger.info("Загружаем данные...")
+            await ensure_data_loaded()
+            data = _DATA_CACHE['data']
+            build_crops_index(data['rows'])
+            logger.info("Отправляем приветственное сообщение...")
+            await context.bot.send_message(chat_id=chat_id, text=welcome, parse_mode='HTML', reply_markup=reply_kb())
+            logger.info("Приветственное сообщение отправлено успешно")
+        except Exception as e:
+            logger.error(f"Ошибка в cmd_start: {e}")
+            try:
+                await context.bot.send_message(chat_id=chat_id, text="❌ Произошла ошибка при запуске бота")
+            except:
+                pass
 
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -820,11 +833,13 @@ async def cmd_dbg_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger = logging.getLogger(__name__)
     msg = update.effective_message
     if not msg or not msg.text:
         return
     chat_id = update.effective_chat.id if update.effective_chat else None
     text = msg.text
+    logger.info(f"Получено сообщение от {chat_id}: {text[:50]}...")
     btn = clean_btn(text)
     if text == '/start' or text == '/restart':
         await cmd_start(update, context)
