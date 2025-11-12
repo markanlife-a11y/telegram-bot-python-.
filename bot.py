@@ -2,7 +2,7 @@ import os
 import asyncio
 import json
 import time
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Callable
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
