@@ -883,6 +883,27 @@ def format_tank_calculation_result(result: Dict[str, Any], title: str = "") -> s
     return "\n".join(lines)
 
 
+def format_calculator_result_card(mode: str, culture: str, pesticide_name: str, rate_str: str, amount: float, result: Any) -> str:
+    """Unified formatter to mirror Code.gs card-style output for all calculator modes."""
+    header_lines: List[str] = []
+    header_lines.append(f"🌱 <i>Культура:</i> <b>{culture}</b>")
+    header_lines.append(f"📦 <i>Препарат:</i> <b>{pesticide_name}</b>")
+    if rate_str:
+        header_lines.append(f"💧 <i>Норма:</i> <b>{rate_str}</b>")
+
+    if mode == 'tank':
+        title = f"Расчёт для бака {format_number(amount, 0)} л"
+        body = format_tank_calculation_result(result, title)
+    elif mode == 'area':
+        title = f"Расчёт для {format_number(amount, 1)} га"
+        body = format_calculation_result(result, title)
+    else:  # seed
+        title = f"Протравливание {format_number(amount, 1)} т семян"
+        body = format_calculation_result(result, title)
+
+    return "\n".join(header_lines) + "\n\n" + body
+
+
 def create_smart_keyboard(items: List[str], callback_func) -> List[List[InlineKeyboardButton]]:
     """
     Smart button grouping: long labels occupy full row, short labels go two per row.
@@ -1094,15 +1115,18 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         typ = get_val(r,'type')
                         ai = get_val(r,'ai')
                         rate = get_val(r,'rate')
+                        crops = get_val(r,'crops')
                         line = []
                         if name:
                             line.append('🛡️ <b>'+name+'</b>')
                         if typ:
-                            line.append('🏷️ Вид: '+typ)
+                            line.append('🏷️ Вид: <b>'+typ+'</b>')
                         if ai:
-                            line.append('🧪 Д.в.: '+ai)
+                            line.append('🧪 Д.в.: <b>'+ai+'</b>')
+                        if crops:
+                            line.append('🌱 Культура: <b>'+crops+'</b>')
                         if rate:
-                            line.append('💧 Норма: '+rate)
+                            line.append('💧 Норма: <b>'+rate+'</b>')
                         chunks.append('\n'.join(line))
                     await msg.reply_html(('\n\n').join(chunks), reply_markup=reply_kb())
                 clear_user_state(context)
@@ -1126,13 +1150,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         name = get_val(r,'name')
                         ai = get_val(r,'ai')
                         rate = get_val(r,'rate')
+                        typ = get_val(r,'type')
+                        crops = get_val(r,'crops')
                         line = []
                         if name:
                             line.append('🛡️ <b>'+name+'</b>')
+                        if typ:
+                            line.append('🏷️ Вид: <b>'+typ+'</b>')
                         if ai:
-                            line.append('🧪 Д.в.: '+ai)
+                            line.append('🧪 Д.в.: <b>'+ai+'</b>')
+                        if crops:
+                            line.append('🌱 Культура: <b>'+crops+'</b>')
                         if rate:
-                            line.append('💧 Норма: '+rate)
+                            line.append('💧 Норма: <b>'+rate+'</b>')
                         chunks.append('\n'.join(line))
                     await msg.reply_html(('\n\n').join(chunks), reply_markup=reply_kb())
                 clear_user_state(context)
@@ -1303,7 +1333,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         msg_text = format_calculator_result_card(calc_mode, culture, pesticide_name, rate_str, amount, result)
                         
                         # Add "Other rate" button
-                        keyboard = [[InlineKeyboardButton('🔄 Другая норма', callback_data='calc_custom_rate')]]
+                        keyboard = [[InlineKeyboardButton('🔄 Другая норма', callback_data='calc|other_rate')]]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         
                         await msg.reply_html(msg_text, reply_markup=reply_markup)
@@ -1688,20 +1718,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode == 'tank':
             set_user_state(context, STATE_CALC_WATER_RATE_INPUT, calc_mode=mode, culture=culture, pesticide_name=pesticide_name, rate_str=rate_str, components=comps)
             await q.message.edit_text(
-                text=f'✅ Препарат: {pesticide_name}\n💧 Норма: {rate_str}\n\n💦 Укажите норму воды (л/га):',
-                reply_markup=None
+                text=f'🌱 Культура: <b>{culture}</b>\n✅ Препарат: <b>{pesticide_name}</b>\n💧 Норма: <b>{rate_str}</b>\n\n💦 Укажите норму воды (л/га):',
+                reply_markup=None,
+                parse_mode='HTML'
             )
         elif mode == 'area':
             set_user_state(context, STATE_CALC_AMOUNT_INPUT, calc_mode=mode, culture=culture, pesticide_name=pesticide_name, rate_str=rate_str, components=comps)
             await q.message.edit_text(
-                text=f'✅ Препарат: {pesticide_name}\n💧 Норма: {rate_str}\n\n📏 Укажите площадь (га):',
-                reply_markup=None
+                text=f'🌱 Культура: <b>{culture}</b>\n✅ Препарат: <b>{pesticide_name}</b>\n💧 Норма: <b>{rate_str}</b>\n\n📏 Укажите площадь (га):',
+                reply_markup=None,
+                parse_mode='HTML'
             )
         else:  # seed
             set_user_state(context, STATE_CALC_AMOUNT_INPUT, calc_mode=mode, culture=culture, pesticide_name=pesticide_name, rate_str=rate_str, components=comps)
             await q.message.edit_text(
-                text=f'✅ Препарат: {pesticide_name}\n💧 Норма: {rate_str}\n\n🌾 Укажите количество семян (т):',
-                reply_markup=None
+                text=f'🌱 Культура: <b>{culture}</b>\n✅ Препарат: <b>{pesticide_name}</b>\n💧 Норма: <b>{rate_str}</b>\n\n🌾 Укажите количество семян (т):',
+                reply_markup=None,
+                parse_mode='HTML'
             )
         return
 
@@ -1762,17 +1795,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ai = get_val(r,'ai')
             pests = get_val(r,'pests')
             rate = get_val(r,'rate')
+            crops = get_val(r,'crops')
             line = []
             if name:
                 line.append('🛡️ <b>'+name+'</b>')
             if typ:
-                line.append('🏷️ Вид: '+typ)
+                line.append('🏷️ Вид: <b>'+typ+'</b>')
             if ai:
-                line.append('🧪 Д.в.: '+ai)
+                line.append('🧪 Д.в.: <b>'+ai+'</b>')
+            if crops:
+                line.append('🌱 Культура: <b>'+crops+'</b>')
             if pests:
-                line.append('⚠️ Вредные объекты: '+pests)
+                line.append('⚠️ Вредные объекты: <b>'+pests+'</b>')
             if rate:
-                line.append('💧 Норма: '+rate)
+                line.append('💧 Норма: <b>'+rate+'</b>')
             chunks.append('\n'.join(line))
         text_out = ('\n\n').join(chunks)
         await q.message.edit_text(text=text_out, parse_mode='HTML', reply_markup=None)
