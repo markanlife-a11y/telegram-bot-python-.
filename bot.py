@@ -615,26 +615,17 @@ def parse_rate_components(rate_string: str) -> List[Dict[str, Any]]:
     return result
 
 
-def smart_convert(value: float, unit: str) -> tuple:
+def smart_convert(value: float, unit: str) -> Tuple[float, str]:
     """
-    Convert small units to large units if value is large enough.
-    
-    Returns: (converted_value, new_unit)
+    Convert small units to larger units when appropriate.
+    Returns a tuple: (converted_value, unit)
     """
-    if unit == 'мл' and value >= 1000:
-        return (value / 1000, 'л')
-    elif unit == 'г' and value >= 1000:
-    
-    # Extract first number from string
-    import re
-    match = re.search(r'\d+(?:\.\d+)?', s)
-    if match:
-        try:
-            return float(match.group())
-        except ValueError:
-            return float('nan')
-    
-    return float('nan')
+    u = (unit or '').lower()
+    if u == 'мл' and value >= 1000:
+        return (value / 1000.0, 'л')
+    if u == 'г' and value >= 1000:
+        return (value / 1000.0, 'кг')
+    return (value, unit)
 
 
 def format_number(num: float, precision: int = 2) -> str:
@@ -648,6 +639,17 @@ def format_number(num: float, precision: int = 2) -> str:
     return formatted
 
 
+def parse_number(s: str) -> float:
+    """Parse a number from a string, accepting comma as decimal separator."""
+    try:
+        import re
+        s = str(s or '').strip().replace(' ', '').replace(',', '.')
+        m = re.search(r'[-+]?\d+(?:\.\d+)?', s)
+        return float(m.group()) if m else float('nan')
+    except Exception:
+        return float('nan')
+
+
 def format_num_prec(num: float, precision: int) -> str:
     """Format number with exact precision from Code.gs."""
     if precision <= 0:
@@ -657,45 +659,6 @@ def format_num_prec(num: float, precision: int) -> str:
     return formatted
 
 
-def smart_convert(value: float, unit: str, precision: int = 2) -> Dict[str, Any]:
-    """Smart unit conversion from Code.gs - converts ml to l and g to kg for large values."""
-    if unit.lower() == 'мл':
-        if value >= 1000:
-            # Convert to liters
-            new_value = value / 1000
-            return {
-                'value': new_value,
-                'unit': 'л',
-                'str': format_num_prec(new_value, precision) + ' л'
-            }
-        else:
-            return {
-                'value': value,
-                'unit': 'мл',
-                'str': format_num_prec(value, precision) + ' мл'
-            }
-    elif unit.lower() == 'г':
-        if value >= 1000:
-            # Convert to kilograms
-            new_value = value / 1000
-            return {
-                'value': new_value,
-                'unit': 'кг',
-                'str': format_num_prec(new_value, precision) + ' кг'
-            }
-        else:
-            return {
-                'value': value,
-                'unit': 'г',
-                'str': format_num_prec(value, precision) + ' г'
-            }
-    else:
-        # No conversion needed for л and кг
-        return {
-            'value': value,
-            'unit': unit.lower(),
-            'str': format_num_prec(value, precision) + ' ' + unit.lower()
-        }.replace('.', ',')
 
 
 def calculate_for_area(rate_components: List[Dict[str, Any]], hectares: float) -> List[Dict[str, Any]]:
@@ -1306,7 +1269,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         msg_text = format_calculator_result_card('tank', culture, pesticide_name, rate_str, tank_volume, result)
                         
                         # Add "Other rate" button
-                        keyboard = [[InlineKeyboardButton('🔄 Другая норма', callback_data='calc_custom_rate')]]
+                        keyboard = [[InlineKeyboardButton('🔄 Другая норма', callback_data='calc|other_rate')]]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         
                         await msg.reply_html(msg_text, reply_markup=reply_markup)
