@@ -1275,15 +1275,18 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if btn == 'калькулятор расхода препарата':
         clear_user_state(context)
-        set_user_state(context, STATE_CALC_MODE)
         if chat_id:
-            calc_menu = ('🧮 <b>Калькулятор расхода препарата</b>\n\n'
-                        'Выберите тип расчета:\n'
-                        '1️⃣ Расчет по площади (л/га, кг/га)\n'
-                        '2️⃣ Расчет для опрыскивателя (на бак)\n'
-                        '3️⃣ Расчет для протравителя (л/т, кг/т)\n\n'
-                        'Введите номер или название:')
-            await context.bot.send_message(chat_id=chat_id, text=calc_menu, parse_mode='HTML', reply_markup=reply_kb())
+            calc_menu = '🧮 <b>Калькулятор расхода препарата</b>\n\nВыберите тип расчета:'
+            
+            # Create inline keyboard with calculation mode buttons
+            keyboard = [
+                [InlineKeyboardButton('1️⃣ Расчет по площади (л/га, кг/га)', callback_data='calc_mode:area')],
+                [InlineKeyboardButton('2️⃣ Расчет для опрыскивателя (на бак)', callback_data='calc_mode:tank')],
+                [InlineKeyboardButton('3️⃣ Расчет для протравителя (л/т, кг/т)', callback_data='calc_mode:seed')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await context.bot.send_message(chat_id=chat_id, text=calc_menu, parse_mode='HTML', reply_markup=reply_markup)
         return
     if btn == 'помощь':
         clear_user_state(context)
