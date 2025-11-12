@@ -821,15 +821,37 @@ async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_dbg_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id if update.effective_chat else None
     os.environ['DEBUG'] = '1'
+    
+    # Set logging level to DEBUG for more detailed logs
+    logging.getLogger().setLevel(logging.DEBUG)
+    
     if chat_id:
-        await context.bot.send_message(chat_id=chat_id, text='DEBUG=1')
+        debug_info = (
+            '🐛 <b>Режим отладки включен</b>\n\n'
+            '✅ DEBUG=1\n'
+            '✅ Детальное логирование активно\n'
+            '✅ Логи callback-ов включены\n\n'
+            'Теперь отправляйте мне ошибки для анализа.'
+        )
+        await context.bot.send_message(chat_id=chat_id, text=debug_info, parse_mode='HTML')
 
 
 async def cmd_dbg_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id if update.effective_chat else None
     os.environ['DEBUG'] = '0'
+    
+    # Reset logging level to INFO
+    logging.getLogger().setLevel(logging.INFO)
+    
     if chat_id:
-        await context.bot.send_message(chat_id=chat_id, text='DEBUG=0')
+        debug_info = (
+            '🔇 <b>Режим отладки выключен</b>\n\n'
+            '❌ DEBUG=0\n'
+            '❌ Детальное логирование отключено\n'
+            '❌ Логи callback-ов отключены\n\n'
+            'Обычный режим работы восстановлен.'
+        )
+        await context.bot.send_message(chat_id=chat_id, text=debug_info, parse_mode='HTML')
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1428,6 +1450,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg += '\n' + k + ': ' + vv
         await q.message.edit_text(text=msg, parse_mode='HTML')
         return
+    
+    # Handle calculator mode selection
+    if data.startswith('calc_mode:'):
+        mode = data.split(':', 1)[1]
+        clear_user_state(context)
+        
+        if mode == 'area':
+            prompt_text = '🌱 Введите название препарата для расчета по площади:'
+            set_user_state(context, STATE_CALC_CROP, calc_mode='area')
+        elif mode == 'tank':
+            prompt_text = '🌱 Введите название препарата для расчета на опрыскиватель:'
+            set_user_state(context, STATE_CALC_CROP, calc_mode='tank')
+        elif mode == 'seed':
+            prompt_text = '🌱 Введите название препарата для протравливания:'
+            set_user_state(context, STATE_CALC_CROP, calc_mode='seed')
+        else:
+            prompt_text = '🌱 Введите название препарата:'
+            set_user_state(context, STATE_CALC_CROP, calc_mode=mode)
+        
+        await q.message.edit_text(text=prompt_text, parse_mode='HTML')
+        return
+    
+    # Debug logging for unhandled callbacks
+    debug_mode = os.getenv('DEBUG', '0') == '1'
+    if debug_mode:
+        logger = logging.getLogger(__name__)
+        logger.info(f"Необработанный callback: {data}")
+    
     await q.message.reply_text(f'CB: {data}')
 
 
