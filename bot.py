@@ -397,6 +397,324 @@ def build_crops_index(rows: List[Dict[str, Any]]):
     _CROPS_CACHE['map'] = { hash32(crop_key_for_dedup(x)): x for x in lst }
 
 
+# ============================================================================
+# CALCULATOR FUNCTIONS
+# ============================================================================
+
+def parse_rate_components(rate_string: str) -> List[Dict[str, Any]]:
+    """
+    Parse rate string into components.
+    
+    Examples:
+    "0,5–0,7 л/га" -> [{'name': 'препарату', 'min_rate': 0.5, 'max_rate': 0.7, 'unit': 'л', 'measure': 'га', 'precision': 1}]
+    "70 мл/га" -> [{'name': 'препарату', 'min_rate': 70.0, 'max_rate': 70.0, 'unit': 'мл', 'measure': 'га', 'precision': 0}]
+    "0,25 кг/га + ПАВ Контур 0,1 л/га" -> [{'name': 'препарату', ...}, {'name': 'ПАВ Контур', ...}]
+    """
+    import re
+    
+    if not rate_string or not rate_string.strip():
+        return []
+    
+    # Split by '+' to handle multiple components
+    components = [c.strip() for c in rate_string.split('+') if c.strip()]
+    result = []
+    
+    for i, component in enumerate(components):
+        # Pattern to match: [name] number[-number] unit/measure
+        # Examples: "0,5–0,7 л/га", "ПАВ Контур 0,1 л/га", "70 мл/га"
+        pattern = r'^(?:(.+?)\s+)?([0-9]+(?:[,.]\d+)?)(?:[–—-]([0-9]+(?:[,.]\d+)?))?\s*([а-яё]+)/([а-яё]+)$'
+        match = re.match(pattern, component.strip(), re.IGNORECASE)
+        
+        if not match:
+            continue
+            
+        name_part = match.group(1)
+        min_rate_str = match.group(2)
+        max_rate_str = match.group(3)
+        unit = match.group(4)
+        measure = match.group(5)
+        
+        # Convert comma to dot for float parsing
+        min_rate_str = min_rate_str.replace(',', '.')
+        min_rate = float(min_rate_str)
+        
+        if max_rate_str:
+            max_rate_str = max_rate_str.replace(',', '.')
+            max_rate = float(max_rate_str)
+        else:
+            max_rate = min_rate
+            
+        # Determine precision from original string
+        original_min = match.group(2)
+        if ',' in original_min:
+            precision = len(original_min.split(',')[1])
+        elif '.' in original_min:
+            precision = len(original_min.split('.')[1])
+        else:
+            precision = 0
+            
+        # Set name
+        if name_part and name_part.strip():
+            name = name_part.strip()
+        else:
+            name = 'препарату'
+            
+        result.append({
+            'name': name,
+            'min_rate': min_rate,
+            'max_rate': max_rate,
+            'unit': unit,
+            'measure': measure,
+            'precision': precision
+        })
+    
+    return result
+
+
+def smart_convert(value: float, unit: str) -> tuple:
+    """
+    Convert small units to large units if value is large enough.
+    
+    Returns: (converted_value, new_unit)
+    """
+    if unit == 'мл' and value >= 1000:
+        return (value / 1000, 'л')
+    elif unit == 'г' and value >= 1000:
+        return (value / 1000, 'кг')
+    else:
+        return (value, unit)
+
+
+def format_number(value: float, precision: int) -> str:
+    """
+    Format number with comma as decimal separator and given precision.
+    
+    Example: format_number(123.45, 1) -> "123,5"
+    """
+    if precision == 0:
+        return str(int(round(value)))
+    else:
+        formatted = f"{value:.{precision}f}"
+        return formatted.replace('.', ',')
+
+
+def calculate_for_area(rate_components: List[Dict[str, Any]], hectares: float) -> List[Dict[str, Any]]:
+    """
+    Calculate total amount of pesticide for given area.
+    
+    Works only for components with measure == 'га'.
+    """
+    result = []
+    
+    for component in rate_components:
+        if component.get('measure') != 'га':
+            continue
+            
+        min_total = component['min_rate'] * hectares
+        max_total = component['max_rate'] * hectares
+        
+        # Apply smart conversion
+        min_converted, unit_min = smart_convert(min_total, component['unit'])
+        max_converted, unit_max = smart_convert(max_total, component['unit'])
+        
+        # Use the unit from max conversion (should be same as min)
+        final_unit = unit_max
+        
+        result.append({
+            'name': component['name'],
+            'min_total': min_converted,
+            'max_total': max_converted,
+            'unit': final_unit
+        })
+    
+    return result
+
+
+def calculate_for_tank(rate_components: List[Dict[str, Any]], water_rate_per_ha: float, tank_volume: float) -> Dict[str, Any]:
+    """
+    Calculate amount of pesticide for one tank filling.
+    
+    Works only for components with measure == 'га'.
+    """
+    ha_per_tank = tank_volume / water_rate_per_ha
+    components_result = []
+    
+    for component in rate_components:
+        if component.get('measure') != 'га':
+            continue
+            
+        min_per_tank = component['min_rate'] * ha_per_tank
+        max_per_tank = component['max_rate'] * ha_per_tank
+        
+        # Apply smart conversion
+        min_converted, unit_min = smart_convert(min_per_tank, component['unit'])
+        max_converted, unit_max = smart_convert(max_per_tank, component['unit'])
+        
+        # Use the unit from max conversion
+        final_unit = unit_max
+        
+        components_result.append({
+            'name': component['name'],
+            'min_total': min_converted,
+            'max_total': max_converted,
+            'unit': final_unit
+        })
+    
+    return {
+        'ha_per_tank': ha_per_tank,
+        'components': components_result
+    }
+
+
+def calculate_for_seed(rate_components: List[Dict[str, Any]], tons: float) -> List[Dict[str, Any]]:
+    """
+    Calculate total amount of seed treatment for given tons of seeds.
+    
+    Works only for components with measure == 'т'.
+    """
+    result = []
+    
+    for component in rate_components:
+        if component.get('measure') != 'т':
+            continue
+            
+        min_total = component['min_rate'] * tons
+        max_total = component['max_rate'] * tons
+        
+        # Apply smart conversion
+        min_converted, unit_min = smart_convert(min_total, component['unit'])
+        max_converted, unit_max = smart_convert(max_total, component['unit'])
+        
+        # Use the unit from max conversion
+        final_unit = unit_max
+        
+        result.append({
+            'name': component['name'],
+            'min_total': min_converted,
+            'max_total': max_converted,
+            'unit': final_unit
+        })
+    
+    return result
+
+
+def apply_custom_rate(rate_components: List[Dict[str, Any]], custom_rate: float) -> List[Dict[str, Any]]:
+    """
+    Apply custom rate to the first component.
+    
+    Modifies the first component's min_rate and max_rate to custom_rate.
+    """
+    if not rate_components:
+        return rate_components
+        
+    # Create a copy to avoid modifying the original
+    result = []
+    for i, component in enumerate(rate_components):
+        new_component = component.copy()
+        if i == 0:  # First component gets custom rate
+            new_component['min_rate'] = custom_rate
+            new_component['max_rate'] = custom_rate
+        result.append(new_component)
+    
+    return result
+
+
+# ============================================================================
+# STATE MANAGEMENT SYSTEM
+# ============================================================================
+
+# State constants
+STATE_NONE = None
+STATE_AWAITING_NAME = 'awaiting_name'
+STATE_AWAITING_DV = 'awaiting_dv'
+STATE_CALC_MODE = 'calculator_awaiting_mode'
+STATE_CALC_CROP = 'calculator_awaiting_crop'
+STATE_CALC_HECTARES = 'calculator_awaiting_hectares'
+STATE_CALC_WATER_RATE = 'calculator_awaiting_water_rate'
+STATE_CALC_TANK_VOLUME = 'calculator_awaiting_tank_volume'
+STATE_CALC_TONS = 'calculator_awaiting_tons'
+
+
+def clear_user_state(context: ContextTypes.DEFAULT_TYPE):
+    """Clear all user state data."""
+    context.user_data.clear()
+
+
+def set_user_state(context: ContextTypes.DEFAULT_TYPE, state: str, **kwargs):
+    """Set user state and optional data."""
+    context.user_data['state'] = state
+    for key, value in kwargs.items():
+        context.user_data[key] = value
+
+
+def get_user_state(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Get current user state."""
+    return context.user_data.get('state', STATE_NONE)
+
+
+def format_calculation_result(components: List[Dict[str, Any]], title: str = "") -> str:
+    """Format calculation results into a readable message."""
+    if not components:
+        return "❌ Нет данных для расчета"
+    
+    lines = []
+    if title:
+        lines.append(f"📊 <b>{title}</b>\n")
+    
+    for comp in components:
+        name = comp.get('name', 'препарату')
+        min_total = comp.get('min_total', 0)
+        max_total = comp.get('max_total', 0)
+        unit = comp.get('unit', '')
+        
+        if min_total == max_total:
+            amount_str = format_number(min_total, 2 if min_total < 1 else 1)
+        else:
+            min_str = format_number(min_total, 2 if min_total < 1 else 1)
+            max_str = format_number(max_total, 2 if max_total < 1 else 1)
+            amount_str = f"{min_str}–{max_str}"
+        
+        if name == 'препарату':
+            lines.append(f"💧 По {name}: <b>{amount_str} {unit}</b>")
+        else:
+            lines.append(f"➕ {name}: <b>{amount_str} {unit}</b>")
+    
+    return "\n".join(lines)
+
+
+def format_tank_calculation_result(result: Dict[str, Any], title: str = "") -> str:
+    """Format tank calculation results into a readable message."""
+    if not result or not result.get('components'):
+        return "❌ Нет данных для расчета"
+    
+    lines = []
+    if title:
+        lines.append(f"📊 <b>{title}</b>\n")
+    
+    ha_per_tank = result.get('ha_per_tank', 0)
+    lines.append(f"🚜 Площадь на бак: <b>{format_number(ha_per_tank, 1)} га</b>\n")
+    
+    for comp in result['components']:
+        name = comp.get('name', 'препарату')
+        min_total = comp.get('min_total', 0)
+        max_total = comp.get('max_total', 0)
+        unit = comp.get('unit', '')
+        
+        if min_total == max_total:
+            amount_str = format_number(min_total, 2 if min_total < 1 else 1)
+        else:
+            min_str = format_number(min_total, 2 if min_total < 1 else 1)
+            max_str = format_number(max_total, 2 if max_total < 1 else 1)
+            amount_str = f"{min_str}–{max_str}"
+        
+        if name == 'препарату':
+            lines.append(f"💧 По {name}: <b>{amount_str} {unit}</b>")
+        else:
+            lines.append(f"➕ {name}: <b>{amount_str} {unit}</b>")
+    
+    return "\n".join(lines)
+
+
 def crops_page_keyboard(page: int = 0, per: int = 22) -> InlineKeyboardMarkup:
     total = len(_CROPS_CACHE['list'])
     if total == 0:
