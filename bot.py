@@ -636,16 +636,14 @@ async def main_async():
         if not public_url:
             raise RuntimeError('PUBLIC_URL or RENDER_EXTERNAL_URL not set for webhook')
         path = f"/webhook/{token}"
-        await app.initialize()
-        await app.start()
-        await app.bot.set_webhook(url=public_url + path, allowed_updates=None)
-        await app.run_webhook(listen='0.0.0.0', port=port, webhook_url=path)
+        app.run_webhook(
+            listen='0.0.0.0',
+            port=port,
+            webhook_url=public_url + path,
+            url_path=path
+        )
     else:
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling()
-        await app.updater.idle()
-        await app.stop()
+        app.run_polling()
 
 
 if __name__ == '__main__':
