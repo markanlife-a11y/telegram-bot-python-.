@@ -1414,10 +1414,25 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    logger = logging.getLogger(__name__)
+    
+    logger.info("Запуск Telegram бота...")
+    
     token = os.getenv('TELEGRAM_TOKEN')
     if not token:
+        logger.error("TELEGRAM_TOKEN не установлен!")
         raise RuntimeError('TELEGRAM_TOKEN not set')
-    app = ApplicationBuilder().token(token).build()
+    
+    logger.info(f"Токен найден: {token[:10]}...")
+    
+    try:
+        app = ApplicationBuilder().token(token).build()
+        logger.info("ApplicationBuilder создан успешно")
+    except Exception as e:
+        logger.error(f"Ошибка создания ApplicationBuilder: {e}")
+        raise
+    
+    # Добавляем обработчики
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('menu', cmd_menu))
     app.add_handler(CommandHandler('help', cmd_help))
@@ -1427,27 +1442,61 @@ def main():
     app.add_handler(CommandHandler('dbg_off', cmd_dbg_off))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), on_message))
     app.add_handler(CallbackQueryHandler(on_callback))
+    logger.info("Все обработчики добавлены")
 
     use_webhook = os.getenv('USE_WEBHOOK', '0') == '1'
+    logger.info(f"Режим работы: {'webhook' if use_webhook else 'polling'}")
+    
     if use_webhook:
         public_url = os.getenv('RENDER_EXTERNAL_URL') or os.getenv('PUBLIC_URL')
         port = int(os.getenv('PORT', '10000'))
         if not public_url:
+            logger.error("PUBLIC_URL или RENDER_EXTERNAL_URL не установлены для webhook")
             raise RuntimeError('PUBLIC_URL or RENDER_EXTERNAL_URL not set for webhook')
+        
         path = f"/webhook/{token}"
-        app.run_webhook(
-            listen='0.0.0.0',
-            port=port,
-            webhook_url=public_url + path,
-            url_path=path,
-            allowed_updates=Update.ALL_TYPES
-        )
+        webhook_url = public_url + path
+        logger.info(f"Запуск webhook на порту {port}, URL: {webhook_url}")
+        
+        try:
+            app.run_webhook(
+                listen='0.0.0.0',
+                port=port,
+                webhook_url=webhook_url,
+                url_path=path,
+                allowed_updates=Update.ALL_TYPES
+            )
+        except Exception as e:
+            logger.error(f"Ошибка запуска webhook: {e}")
+            raise
     else:
-        app.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
-        )
+        logger.info("Запуск polling режима...")
+        try:
+            # Сначала удаляем webhook если он был установлен
+            logger.info("Удаляем старый webhook (если есть)...")
+            import asyncio
+            async def delete_webhook():
+                try:
+                    await app.bot.delete_webhook(drop_pending_updates=True)
+                    logger.info("Webhook удален")
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить webhook: {e}")
+            
+            asyncio.run(delete_webhook())
+            
+            logger.info("Начинаем polling...")
+            app.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True
+            )
+        except Exception as e:
+            logger.error(f"Ошибка запуска polling: {e}")
+            raise
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        logging.error(f"Критическая ошибка: {e}")
+        raise
