@@ -2,18 +2,22 @@ import os
 import asyncio
 import json
 import time
-import re
-import difflib
-from typing import Dict, Any, List, Tuple
+import logging
+from typing import Dict, Any, List, Tuple, Callable
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    level=logging.INFO
+)
 
 
 def clean_btn(text: str) -> str:
     if not text:
         return ''
     t = str(text)
-    # import re
+    import re
     t = re.sub(r'^[^A-Za-zА-Яа-я0-9]+', '', t)
     t = re.sub(r'[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\u200B\s]+', ' ', t)
     t = re.sub(r'[\.,:;!\-–—_/]', '', t)
@@ -63,7 +67,7 @@ def get_val(row: Dict[str, Any], kind: str) -> str:
 
 
 def normalize_text(s: str) -> str:
-    # import re
+    import re
     return re.sub(r'\s+', ' ', re.sub(r'[^a-zа-я0-9\s]', ' ', str(s or '').lower().replace('ё','е'))).strip()
 
 
@@ -236,7 +240,7 @@ def hash32(s: str) -> str:
 
 def crop_key_for_dedup(s: str) -> str:
     t = str(s or '').lower()
-    # import re
+    import re
     t = t.replace('ё','е')
     t = re.sub(r'[\s\u00A0\u2007\u202F]+',' ',t).strip()
     t = re.sub(r'\bяров(ой|ая|ые)\b','яров*',t)
@@ -258,7 +262,7 @@ def normalize_crop_name(s: str) -> str:
 
 
 def split_crops_field(s: str) -> List[str]:
-    # import re
+    import re
     base = str(s or '').replace('\u00A0',' ').replace('\u2007',' ').replace('\u202F',' ').split(',')
     tmp = []
     for item in base:
@@ -266,7 +270,7 @@ def split_crops_field(s: str) -> List[str]:
     base = [x for x in tmp if x]
     result = []
     for item in base:
-        m1 = re.match(r'^(.+?)\s+и\s+(.+?)\s+яровые$', item, flags=re.I)
+        m1 = __import__('re').match(r'^(.+?)\s+и\s+(.+?)\s+яровые$', item, flags=re.I)
         if m1:
             result.append(normalize_crop_name(m1.group(1) + ' яровая'))
             result.append(normalize_crop_name(m1.group(2) + ' яровая'))
@@ -282,7 +286,7 @@ def split_crops_field(s: str) -> List[str]:
             result.append(normalize_crop_name(m2.group(1) + ' озимая'))
             continue
         parts = [p.strip() for p in re.split(r'\s+и\s+', item) if p.strip()]
-        if len(parts)>1 and not re.search(r'[аеиоуыэюя]$', parts[-1], flags=re.I):
+        if len(parts)>1 and not __import__('re').search(r'[аеиоуыэюя]$', parts[-1], flags=re.I):
             for p in parts:
                 result.append(normalize_crop_name(p))
             continue
@@ -308,14 +312,6 @@ def title_case(s: str) -> str:
     return ''.join(out)
 
 
-def sentence_case(s: str) -> str:
-    s_str = str(s or '').replace(r'[\s\u00A0\u2007\u202F]+', ' ').strip()
-    if not s_str:
-        return ''
-    low = s_str.lower()
-    return low[0].upper() + low[1:]
-
-
 def pretty_crop_label(s: str) -> str:
     s = str(s or '').strip()
     parts = s.split()
@@ -333,7 +329,7 @@ def pretty_crop_label(s: str) -> str:
 
 def short_type_label(t: str) -> str:
     t = str(t or '').strip()
-    # import re
+    import re
     m = re.match(r'^([^\s\-(]+)', t)
     return m.group(1) if m else (t or 'Вид')
 
@@ -408,229 +404,6 @@ def build_crops_index(rows: List[Dict[str, Any]]):
 
 
 # ============================================================================
-# NEW/MERGED FUZZY SEARCH & FORMATTING FUNCTIONS
-# ============================================================================
-
-def best_matches(query: str, items: List[str]) -> List[Dict[str, Any]]:
-    """
-    Port of GS bestMatches logic.
-    Scores items against query, query layout variants, and translit.
-    """
-    query_vars = [query]
-    sw = switch_layout(query)
-    query_vars.extend([sw[0], sw[1]])
-    query_vars.append(translit_simple(query))
-    
-    norm_vars = list(set(normalize_text(v) for v in query_vars if v))
-    
-    scored = []
-    for it in items:
-        text = it
-        norm_text = normalize_text(text)
-        if not norm_text:
-            scored.append({'item': it, 'score': 1e9})
-            continue
-
-        best = 1e9
-        found_exact = False
-        
-        for norm_query in norm_vars:
-            if found_exact:
-                break
-            
-            # 1. Check for exact substring first
-            if norm_query in norm_text:
-                best = 0.0
-                found_exact = True
-                break
-            
-            # 2. If no substring, check word-by-word fuzzy score
-            norm_words = norm_text.split(' ')
-            for word in norm_words:
-                if len(word) < 3:
-                    continue
-                s = fuzzy_score(norm_query, word)
-                if s < best:
-                    best = s
-                    
-        scored.append({'item': it, 'score': best})
-
-    scored.sort(key=lambda x: x['score'])
-    return scored
-
-
-def build_grouped_product(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Port of GS buildGroupedProduct"""
-    if not rows:
-        return None
-    first = rows[0]
-    name = get_val(first, 'name')
-    typ = get_val(first, 'type')
-    ai_groups = {}
-    
-    for r in rows:
-        ai = get_val(r, 'ai')
-        ai_key = normalize_text(ai)
-        if ai_key not in ai_groups:
-            ai_groups[ai_key] = {'ai': ai, 'entries': [], '_seen': {}}
-            
-        crops = split_crops_field(get_val(r, 'crops') or '')
-        pests = get_val(r, 'pests')
-        rate = get_val(r, 'rate')
-        
-        for c in crops:
-            k = f"{normalize_text(c)}|{normalize_text(pests)}|{normalize_text(rate)}"
-            if k in ai_groups[ai_key]['_seen']:
-                continue
-            ai_groups[ai_key]['_seen'][k] = True
-            ai_groups[ai_key]['entries'].append({'crop': c, 'pests': pests, 'rate': rate})
-            
-    for k in ai_groups:
-        ai_groups[k]['entries'].sort(key=lambda x: x['crop'])
-        del ai_groups[k]['_seen'] # Clean up
-        
-    return {'name': name, 'type': typ, 'aiGroups': ai_groups}
-
-
-def format_grouped_product(group: Dict[str, Any]) -> str:
-    """Port of GS formatGroupedProduct"""
-    if not group:
-        return ""
-    out = []
-    if group.get('type'):
-        out.append(f"<i>› {group['type']}</i>")
-        out.append("")
-        
-    if group.get('name'):
-        out.append(f"🛡️ <b>{group['name']}</b>")
-        
-    ai_groups = group.get('aiGroups', {})
-    for ai_key in ai_groups:
-        ai_display = ai_groups[ai_key].get('ai')
-        if ai_display:
-            out.append('————————————')
-            out.append(f"🧪 <b><i>Д.в.: {ai_display}</i></b>")
-            out.append('————————————')
-            
-        entries = ai_groups[ai_key].get('entries', [])
-        by_rate = {}
-        for ent in entries:
-            rate_key = str(ent.get('rate') or '').strip()
-            if rate_key not in by_rate:
-                by_rate[rate_key] = {'rate': ent['rate'], 'crops': [], 'pests': []}
-            by_rate[rate_key]['crops'].append(title_case(ent['crop']))
-            if ent.get('pests'):
-                by_rate[rate_key]['pests'].append(ent['pests'])
-                
-        first_rate_block = True
-        for rk in by_rate:
-            grp = by_rate[rk]
-            if not first_rate_block:
-                out.append('—')
-            first_rate_block = False
-            
-            # Format crops
-            crops_formatted = []
-            for c in grp['crops']:
-                parts = str(c or '').strip().split()
-                if not parts:
-                    continue
-                first = parts.pop(0)
-                rest = ' '.join(parts).lower()
-                crops_formatted.append(f"{first} {rest}" if rest else first)
-                
-            line = f"• 🌱 {', '.join(crops_formatted)}"
-            if grp['rate']:
-                line += f"  |  💧 <b>{grp['rate']}</b>"
-            out.append(line)
-            
-            # Normalize and dedupe pests
-            pests_set = {}
-            for p in grp['pests']:
-                for x in re.split(r'[,;]', str(p or '')):
-                    x = re.sub(r'[\.,;:]+$', '', str(x or '').lower().strip())
-                    x = re.sub(r'[\s\u00A0\u2007\u202F]+', ' ', x).strip()
-                    if x:
-                        pests_set[x] = True
-            
-            pests_arr = sorted(list(pests_set.keys()))
-            if pests_arr:
-                out.append(f"   ⚠️ {', '.join(pests_arr)}")
-                
-    return '\n'.join(out)
-
-
-def format_multiple_products(rows: List[Dict[str, Any]]) -> str:
-    """Port of GS formatMultipleProducts"""
-    if not rows:
-        return 'Не найдено'
-    
-    groups = {}
-    for r in rows:
-        name = get_val(r, 'name')
-        key = normalize_text(name)
-        if not key:
-            continue
-        if key not in groups:
-            groups[key] = []
-        groups[key].append(r)
-        
-    keys = sorted(groups.keys())
-    title = ''
-    if keys:
-        first_grouped = build_grouped_product(groups[keys[0]])
-        if first_grouped and first_grouped.get('type'):
-            title = f"<i>› {first_grouped['type']}</i>"
-            
-    blocks = []
-    for i, key in enumerate(keys):
-        grows = groups[key]
-        grouped = build_grouped_product(grows)
-        if grouped:
-            if i == 0 and title: # Don't repeat type if we used it as title
-                grouped['type'] = ''
-            blocks.append(format_grouped_product(grouped))
-            
-    body = '\n\n\n'.join(blocks) # 2 empty lines
-    return f"{title}\n\n{body}" if title else body
-
-
-def create_smart_keyboard(items: List[str], callback_data_func, max_len: int = 20) -> List[List[InlineKeyboardButton]]:
-    """
-    Port of GS smartGroupButtons.
-    Groups buttons smartly: long text gets a full row, short text pairs up.
-    """
-    rows = []
-    buttons = []
-    for item in items:
-        btn_data = callback_data_func(item)
-        buttons.append({
-            'btn': InlineKeyboardButton(text=item, callback_data=btn_data),
-            'text': item,
-            'used': False
-        })
-
-    for i in range(len(buttons)):
-        if buttons[i]['used']:
-            continue
-        current = buttons[i]
-        current['used'] = True
-        
-        if len(current['text']) > max_len:
-            rows.append([current['btn']])
-        else:
-            row = [current['btn']]
-            # Find next short button
-            for j in range(i + 1, len(buttons)):
-                if not buttons[j]['used'] and len(buttons[j]['text']) <= max_len:
-                    row.append(buttons[j]['btn'])
-                    buttons[j]['used'] = True
-                    break
-            rows.append(row)
-    return rows
-
-
-# ============================================================================
 # CALCULATOR FUNCTIONS
 # ============================================================================
 
@@ -643,7 +416,7 @@ def parse_rate_components(rate_string: str) -> List[Dict[str, Any]]:
     "70 мл/га" -> [{'name': 'препарату', 'min_rate': 70.0, 'max_rate': 70.0, 'unit': 'мл', 'measure': 'га', 'precision': 0}]
     "0,25 кг/га + ПАВ Контур 0,1 л/га" -> [{'name': 'препарату', ...}, {'name': 'ПАВ Контур', ...}]
     """
-    # import re
+    import re
     
     if not rate_string or not rate_string.strip():
         return []
@@ -867,12 +640,6 @@ STATE_CALC_WATER_RATE = 'calculator_awaiting_water_rate'
 STATE_CALC_TANK_VOLUME = 'calculator_awaiting_tank_volume'
 STATE_CALC_TONS = 'calculator_awaiting_tons'
 
-# Newer, more robust calculator states
-STATE_CALC_PESTICIDE_SELECT = 'calc_awaiting_pesticide_select'
-STATE_CALC_AMOUNT_INPUT = 'calc_awaiting_amount_input'
-STATE_CALC_WATER_RATE_INPUT = 'calc_awaiting_water_rate_input'
-STATE_CALC_TANK_VOLUME_INPUT = 'calc_awaiting_tank_volume_input'
-
 
 def clear_user_state(context: ContextTypes.DEFAULT_TYPE):
     """Clear all user state data."""
@@ -952,53 +719,6 @@ def format_tank_calculation_result(result: Dict[str, Any], title: str = "") -> s
             lines.append(f"➕ {name}: <b>{amount_str} {unit}</b>")
     
     return "\n".join(lines)
-
-def format_calculator_result_card(mode: str, culture: str, pesticide_name: str, rate_str: str, amount: float, result: Any) -> str:
-    """Helper to format the new calculator result card."""
-    # This function seems to be used in the Python-specific calculator flow
-    # I will assume it exists and is correct, as it's not in the GS file.
-    # ... (implementation from original bot (1).py)
-    # Since it's not provided in the original `bot (1).py`, I'll create a simple placeholder.
-    # TODO: This needs to be the *actual* function from the user's file.
-    # Assuming the user's `bot (1).py` had this function, I'll stub it based on its usage.
-    
-    if mode == 'tank':
-        return format_tank_calculation_result(result, f"Расчет для бака {amount} л")
-    elif mode == 'area':
-        return format_calculation_result(result, f"Расчет для {amount} га")
-    elif mode == 'seed':
-        return format_calculation_result(result, f"Протравливание {amount} т семян")
-    return "Результат расчета:\n" + str(result)
-    
-def get_pesticides_for_culture_and_mode(rows: List[Dict[str, Any]], culture: str, calc_mode: str) -> List[Dict[str, Any]]:
-    """Helper for the new calculator flow."""
-    # This function is also part of the Python-specific flow.
-    # I'll stub it based on its name.
-    # TODO: This needs to be the *actual* function from the user's file.
-    
-    cropK = crop_key_for_dedup(culture)
-    measure_target = 'т' if calc_mode == 'seed' else 'га'
-    
-    filtered_rows = []
-    seen_names = set()
-    
-    for r in rows:
-        cropCol = get_val(r,'crops')
-        options = [crop_key_for_dedup(x) for x in split_crops_field(str(cropCol))]
-        
-        if cropK in options:
-            rate_str = get_val(r, 'rate')
-            if not rate_str:
-                continue
-            
-            components = parse_rate_components(rate_str)
-            if components and components[0].get('measure') == measure_target:
-                name = get_val(r, 'name')
-                if name and name not in seen_names:
-                    filtered_rows.append(r)
-                    seen_names.add(name)
-                    
-    return filtered_rows
 
 
 def crops_page_keyboard(page: int = 0, per: int = 22) -> InlineKeyboardMarkup:
@@ -1135,98 +855,67 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if current_state == STATE_AWAITING_NAME:
                 await ensure_data_loaded()
                 rows = _DATA_CACHE['data']['rows']
-                
-                # --- NEW LOGIC from GS ---
-                # 1. Get all unique product names
-                all_names_map = {}
-                for r in rows:
-                    n = get_val(r, 'name')
-                    if n:
-                        nn = normalize_text(n)
-                        if nn not in all_names_map:
-                            all_names_map[nn] = n
-                all_names = list(all_names_map.values())
-                
-                # 2. Get best matches
-                scored = best_matches(text, all_names)
-                
-                # 3. Filter relevant matches (score < 0.4)
-                relevant = [x['item'] for x in scored if x['score'] < 0.4]
-                
-                if len(relevant) == 0:
-                    await msg.reply_text('Ничего не найдено. Попробуйте другое написание.', reply_markup=reply_kb())
-                
-                elif len(relevant) == 1:
-                    # 4. Single match: show card
-                    pname = relevant[0]
-                    rows_p = [r for r in rows if normalize_text(get_val(r, 'name')) == normalize_text(pname)]
-                    text_p = "Не найдено"
-                    if rows_p:
-                        text_p = format_grouped_product(build_grouped_product(rows_p))
-                    await msg.reply_html(text_p, reply_markup=reply_kb())
-
+                q = text
+                def score_row(r):
+                    name = get_val(r, 'name')
+                    if not name:
+                        return 0.0
+                    import difflib
+                    a = normalize_text(q)
+                    b = normalize_text(name)
+                    return difflib.SequenceMatcher(None, a, b).ratio()
+                ranked = sorted(rows, key=score_row, reverse=True)
+                top = [r for r in ranked[:10] if score_row(r) > 0.3]
+                if not top:
+                    await msg.reply_text('Ничего не нашлось. Попробуйте другое написание.', reply_markup=reply_kb())
                 else:
-                    # 5. Multiple matches: show buttons
-                    top_names = relevant[:6]
-                    keyboard_rows = create_smart_keyboard(
-                        top_names,
-                        lambda nm: f"prod|h:{hash32(normalize_text(nm))}"
-                    )
-                    reply_markup = InlineKeyboardMarkup(keyboard_rows)
-                    await msg.reply_html('Найдено несколько вариантов. Выберите препарат:', reply_markup=reply_markup)
-
+                    chunks = []
+                    for r in top:
+                        name = get_val(r,'name')
+                        typ = get_val(r,'type')
+                        ai = get_val(r,'ai')
+                        rate = get_val(r,'rate')
+                        line = []
+                        if name:
+                            line.append('🛡️ <b>'+name+'</b>')
+                        if typ:
+                            line.append('🏷️ Вид: '+typ)
+                        if ai:
+                            line.append('🧪 Д.в.: '+ai)
+                        if rate:
+                            line.append('💧 Норма: '+rate)
+                        chunks.append('\n'.join(line))
+                    await msg.reply_html(('\n\n').join(chunks), reply_markup=reply_kb())
                 clear_user_state(context)
                 return
                 
             elif current_state == STATE_AWAITING_DV:
                 await ensure_data_loaded()
                 rows = _DATA_CACHE['data']['rows']
-                
-                # --- NEW LOGIC from GS ---
-                q_raw = text.strip()
-                variants = [q_raw] + list(switch_layout(q_raw)) + [translit_simple(q_raw)]
-                qnorms = list(set(normalize_text(v) for v in variants if v))
-
-                rows_dv = []
+                q = normalize_text(text)
+                res = []
                 for r in rows:
                     ai = get_val(r, 'ai')
-                    nai = normalize_text(ai)
-                    if not nai:
-                        continue
-                    for qn in qnorms:
-                        if qn and (qn in nai or fuzzy_score(qn, nai) <= 0.35):
-                            rows_dv.append(r)
-                            break
-                            
-                if not rows_dv:
-                    await msg.reply_text('Не найдено по д.в. Попробуйте иначе сформулировать.', reply_markup=reply_kb())
-                    clear_user_state(context)
-                    return
-
-                types_dv = sorted(list(set(get_val(r, 'type') for r in rows_dv if get_val(r, 'type'))))
-
-                if len(types_dv) > 1:
-                    # Show type selection
-                    keyboard_rows = []
-                    for t in types_dv:
-                        label = sentence_case(t)
-                        th = hash32(normalize_text(t))
-                        keyboard_rows.append([
-                            InlineKeyboardButton(text=label, callback_data=f'dvtype|th:{th}|p:0|q:{q_raw}')
-                        ])
-                    keyboard_rows.append([
-                        InlineKeyboardButton(text='Все виды', callback_data=f'dvtype|th:*|p:0|q:{q_raw}')
-                    ])
-                    await msg.reply_html(f'🧪 <b>Д.В.:</b> {q_raw}\n🏷️ <b>Выберите вид препарата</b>', reply_markup=InlineKeyboardMarkup(keyboard_rows))
-                
+                    if ai and q and normalize_text(ai).find(q) >= 0:
+                        res.append(r)
+                res = res[:10]
+                if not res:
+                    await msg.reply_text('Не найдено по д.в.', reply_markup=reply_kb())
                 else:
-                    # Show all results directly
-                    uniq = {normalize_text(get_val(r, 'name')): True for r in rows_dv if get_val(r, 'name')}
-                    count = len(uniq)
-                    out_dv = format_multiple_products(rows_dv)
-                    out_dv += f'\n\n<i>Найдено препаратов: {count}</i>'
-                    await msg.reply_html(out_dv, reply_markup=reply_kb())
-
+                    chunks = []
+                    for r in res:
+                        name = get_val(r,'name')
+                        ai = get_val(r,'ai')
+                        rate = get_val(r,'rate')
+                        line = []
+                        if name:
+                            line.append('🛡️ <b>'+name+'</b>')
+                        if ai:
+                            line.append('🧪 Д.в.: '+ai)
+                        if rate:
+                            line.append('💧 Норма: '+rate)
+                        chunks.append('\n'.join(line))
+                    await msg.reply_html(('\n\n').join(chunks), reply_markup=reply_kb())
                 clear_user_state(context)
                 return
                 
@@ -1621,29 +1310,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await q.answer()
     data = q.data or ''
-    parts = data.split('|')
-    action = parts[0]
-    
-    if action == 'croppg':
+    if data.startswith('croppg|'):
         page = int(data.split('|',1)[1])
         await q.message.edit_reply_markup(reply_markup=crops_page_keyboard(page))
         return
-        
-    if action == 'crop':
+    if data.startswith('crop|'):
         await ensure_data_loaded()
         rows = _DATA_CACHE['data']['rows']
-        # parts = data.split('|')
+        parts = data.split('|')
         ch = parts[1][2:]
         crop = _CROPS_CACHE['map'].get(ch)
         kinds = unique_destroy_kinds_for_crop(rows, crop)
-        kb_rows: List[List[InlineKeyboardButton]] = [[InlineKeyboardButton(text=sentence_case(k), callback_data=f'kind|ch:{ch}|k:{hash32(normalize_text(k))}')] for k in kinds]
+        kb_rows: List[List[InlineKeyboardButton]] = [[InlineKeyboardButton(text=k, callback_data=f'kind|ch:{ch}|k:{hash32(normalize_text(k))}')] for k in kinds]
         await q.message.edit_text(text=f'🌱 {crop}\nВыберите вид уничтожаемого объекта:', parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb_rows))
         return
-        
-    if action == 'kind':
+    if data.startswith('kind|'):
         await ensure_data_loaded()
         rows = _DATA_CACHE['data']['rows']
-        # parts = data.split('|')
+        parts = data.split('|')
         ch = parts[1][3:]
         crop = _CROPS_CACHE['map'].get(ch)
         kind = next((p[2:] for p in parts if p.startswith('k:')), '')
@@ -1652,14 +1336,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kinds_map[hash32(normalize_text(k))] = k
         kind_label = kinds_map.get(kind,'')
         types = unique_types_for_crop_destroy(rows, crop, kind_label)
-        kb_rows: List[List[InlineKeyboardButton]] = [[InlineKeyboardButton(text=sentence_case(t), callback_data=f'type|ch:{ch}|k:{kind}|t:{hash32(normalize_text(t))}')] for t in types]
+        kb_rows: List[List[InlineKeyboardButton]] = [[InlineKeyboardButton(text=short_type_label(t), callback_data=f'type|ch:{ch}|k:{kind}|t:{hash32(normalize_text(t))}')] for t in types]
         await q.message.edit_text(text=f'🌱 {crop}\n{kind_label}\nВыберите вид препарата:', parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb_rows))
         return
-        
-    if action == 'type':
+    if data.startswith('type|'):
         await ensure_data_loaded()
         rows = _DATA_CACHE['data']['rows']
-        # parts = data.split('|')
+        parts = data.split('|')
         ch = parts[1][3:]
         crop = _CROPS_CACHE['map'].get(ch)
         khash = next((p[2:] for p in parts if p.startswith('k:')), '')
@@ -1672,139 +1355,33 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             types_map[hash32(normalize_text(t))] = t
         kind_label = kinds_map.get(khash,'')
         type_label = types_map.get(thash,'')
-        
         filtered = filter_by_crop_type_destroy(rows, crop, type_label, kind_label)
-        
         if not filtered:
             await q.message.edit_text(text='Не найдено', reply_markup=None)
             return
-            
-        # --- NEW FORMATTING ---
-        uniq = {normalize_text(get_val(r, 'name')): True for r in filtered if get_val(r, 'name')}
-        count = len(uniq)
-        text_out = format_multiple_products(filtered)
-        text_out += f'\n\n<i>Найдено препаратов: {count}</i>'
-        
+        chunks = []
+        for r in filtered[:10]:
+            name = get_val(r,'name')
+            typ = get_val(r,'type')
+            ai = get_val(r,'ai')
+            pests = get_val(r,'pests')
+            rate = get_val(r,'rate')
+            line = []
+            if name:
+                line.append('🛡️ <b>'+name+'</b>')
+            if typ:
+                line.append('🏷️ Вид: '+typ)
+            if ai:
+                line.append('🧪 Д.в.: '+ai)
+            if pests:
+                line.append('⚠️ Вредные объекты: '+pests)
+            if rate:
+                line.append('💧 Норма: '+rate)
+            chunks.append('\n'.join(line))
+        text_out = ('\n\n').join(chunks)
         await q.message.edit_text(text=text_out, parse_mode='HTML', reply_markup=None)
         return
-
-    if action == 'prod':
-        # Handles button press from multi-choice name search
-        await ensure_data_loaded()
-        rows = _DATA_CACHE['data']['rows']
-        h = parts[1][2:]
-        
-        # Find the name from the hash
-        pname = None
-        for r in rows:
-            name = get_val(r, 'name')
-            if name and hash32(normalize_text(name)) == h:
-                pname = name
-                break
-        
-        if not pname:
-            await q.message.reply_text('Ошибка: препарат не найден. Попробуйте снова.', reply_markup=reply_kb())
-            return
-
-        rows_p = [r for r in rows if normalize_text(get_val(r, 'name')) == normalize_text(pname)]
-        text_p = "Не найдено"
-        if rows_p:
-            text_p = format_grouped_product(build_grouped_product(rows_p))
-        
-        # Send as a new message, not edit
-        await q.message.reply_html(text_p, reply_markup=reply_kb())
-        return
-
-    if action == 'dvtype':
-        # Handles button press from DV type filter
-        await ensure_data_loaded()
-        rows = _DATA_CACHE['data']['rows']
-        
-        th = ''
-        page = 0
-        q_raw = ''
-        
-        for p in parts[1:]:
-            if p.startswith('th:'):
-                th = p[3:]
-            elif p.startswith('p:'):
-                page = int(p[2:])
-            elif p.startswith('q:'):
-                q_raw = p[2:]
-                
-        # 1. Re-run DV search
-        variants = [q_raw] + list(switch_layout(q_raw)) + [translit_simple(q_raw)]
-        qnorms = list(set(normalize_text(v) for v in variants if v))
-        rows_dv = []
-        for r in rows:
-            ai = get_val(r, 'ai')
-            nai = normalize_text(ai)
-            if not nai:
-                continue
-            for qn in qnorms:
-                if qn and (qn in nai or fuzzy_score(qn, nai) <= 0.35):
-                    rows_dv.append(r)
-                    break
-        
-        # 2. Filter by type
-        type_name = 'Все виды'
-        rows_filtered = rows_dv
-        if th != '*':
-            # Find the type name for the title
-            types_all = sorted(list(set(get_val(r, 'type') for r in rows_dv if get_val(r, 'type'))))
-            for t in types_all:
-                if hash32(normalize_text(t)) == th:
-                    type_name = sentence_case(t)
-                    break
-            rows_filtered = [r for r in rows_dv if hash32(normalize_text(get_val(r, 'type'))) == th]
-            
-        # 3. Get unique names and paginate
-        uniq = {}
-        for r in rows_filtered:
-            n = get_val(r, 'name')
-            if n:
-                uniq[normalize_text(n)] = n
-        all_names = sorted(list(uniq.values()))
-        total = len(all_names)
-        
-        if total == 0:
-            await q.message.edit_text(
-                f'🧪 <b>Д.В.:</b> {q_raw}\n🏷️ <b>Вид:</b> {type_name}\n\n❌ Препараты не найдены.',
-                parse_mode='HTML'
-            )
-            return
-
-        per_page = 10
-        total_pages = max(1, (total + per_page - 1) // per_page)
-        page = max(0, min(page, total_pages - 1))
-        start = page * per_page
-        
-        names_on_this_page = all_names[start : start + per_page]
-        names_on_this_page_norm = [normalize_text(n) for n in names_on_this_page]
-        
-        rows_for_this_page = [r for r in rows_filtered if normalize_text(get_val(r, 'name')) in names_on_this_page_norm]
-        
-        # 4. Format message
-        title = f'🧪 <b>Д.В.:</b> {q_raw}\n🏷️ <b>Вид:</b> {type_name}\n\n'
-        out = format_multiple_products(rows_for_this_page)
-        out += f'\n\n<i>Показаны препараты {start + 1}–{start + len(names_on_this_page)} из {total}</i>'
-        
-        # 5. Build pagination
-        nav_rows = []
-        if total_pages > 1:
-            nav = []
-            cb_base = f'dvtype|th:{th}|q:{q_raw}'
-            if page > 0:
-                nav.append(InlineKeyboardButton(text='⬅️ Назад', callback_data=f'{cb_base}|p:{page - 1}'))
-            nav.append(InlineKeyboardButton(text=f'{page + 1}/{total_pages}', callback_data='noop'))
-            if page < total_pages - 1:
-                nav.append(InlineKeyboardButton(text='Вперёд ➡️', callback_data=f'{cb_base}|p:{page + 1}'))
-            nav_rows.append(nav)
-            
-        await q.message.edit_text(text=title + out, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(nav_rows))
-        return
-
-    if action == 'contact':
+    if data.startswith('contact|'):
         idx = int(data.split('|',1)[1]) if '|' in data else -1
         contacts = await ensure_contacts_loaded()
         if idx < 0 or idx >= len(contacts):
@@ -1833,11 +1410,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg += '\n' + k + ': ' + vv
         await q.message.edit_text(text=msg, parse_mode='HTML')
         return
-        
-    # Fallback for other callbacks (e.g., calculator)
-    # This part is complex, better to just log and do nothing
-    # await q.message.reply_text(f'CB: {data}')
-    pass
+    await q.message.reply_text(f'CB: {data}')
 
 
 def main():
@@ -1866,10 +1439,14 @@ def main():
             listen='0.0.0.0',
             port=port,
             webhook_url=public_url + path,
-            url_path=path
+            url_path=path,
+            allowed_updates=Update.ALL_TYPES
         )
     else:
-        app.run_polling()
+        app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
 
 
 if __name__ == '__main__':
